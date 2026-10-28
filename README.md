@@ -131,9 +131,11 @@ count has arrived before the rider is chosen.
 
 **Ledgers** (`pipeline/ledgers.sql`). A payout is the delivery fee at the
 quoted multiplier, recorded when the order store says the order was
-delivered, to the rider the dispatcher chose. A credit is a fifth of the
-basket when a delivery came more than ten minutes after the promise, or the
-basket when the order was cancelled.
+delivered, to the rider the dispatcher chose. The delivery and the decision
+meet in a join keyed by the order that keeps each side for ten minutes of
+wall-clock time, so a dispatcher running late still finds the delivery
+waiting. A credit is a fifth of the basket when a delivery came more than
+ten minutes after the promise, or the basket when the order was cancelled.
 
 **Analytics** (`pipeline/analytics.sql`). Every change, decision, pricing
 window and payout lands in ClickHouse as a row. Each customer's running
@@ -169,7 +171,10 @@ graph and the analytics store from empty, starts clink, submits the seven
 jobs, plays the night at thirty times real time (six minutes), kills Worker 1
 at half-time and starts it again, resends a batch of reports, and checks
 every store. `SPEED=10` plays it slower; `CLEANUP=1` removes everything at
-the end. The stack otherwise stays up: Neo4j Browser is at
+the end. `DISPATCH_PARALLELISM=3` runs the dispatcher as three subtasks;
+every job otherwise runs as one. That needs a clink built after the fix to
+how a keyed row's state is filed for a restore, which the first run at
+parallelism three found. The stack otherwise stays up: Neo4j Browser is at
 http://localhost:7474, the Coordinator at http://localhost:8081, and
 ClickHouse answers on port 29000.
 

@@ -4,6 +4,7 @@
 #
 #   CLINK_BIN_DIR=<clink build dir> ./run.sh   clink from a local build
 #   SPEED=30 ./run.sh                          the night at thirty times real time
+#   DISPATCH_PARALLELISM=3 ./run.sh            the dispatcher three ways (see README)
 #   CLEANUP=1 ... ./run.sh                     and remove everything at the end
 #
 # Steps: generate the night (tools/world.py); start the broker, the order
@@ -30,6 +31,7 @@ NEO4J_HTTP_PORT="${NEO4J_HTTP_PORT:-7474}"
 CLICKHOUSE_HOST_PORT="${CLICKHOUSE_HOST_PORT:-29000}"
 CLINK_HTTP_PORT="${CLINK_HTTP_PORT:-8081}"
 SPEED="${SPEED:-30}"
+DISPATCH_PARALLELISM="${DISPATCH_PARALLELISM:-1}"
 export KAFKA_HOST_PORT POSTGRES_HOST_PORT NEO4J_HTTP_PORT CLICKHOUSE_HOST_PORT
 # Read by the Workers for the dispatch job's lookup table.
 export NEO4J_PASSWORD=half-time-pw
@@ -121,8 +123,9 @@ for job in orders pricing quotes dispatch ledgers analytics archive; do
       -e "s#port *= *'9000'#port = '${CLICKHOUSE_HOST_PORT}'#g" \
       -e "s#'/archive/#'${ROOT}/state/archive/#g" \
       "pipeline/${job}.sql" >"${STATE}/${job}.sql"
+  p=1; [ "${job}" = dispatch ] && p="${DISPATCH_PARALLELISM}"
   "${BIN}/clink" run "${STATE}/${job}.sql" --coordinator-host=127.0.0.1 \
-    --coordinator-port="${CLINK_HTTP_PORT}" --name="${job}" \
+    --coordinator-port="${CLINK_HTTP_PORT}" --name="${job}" --parallelism="${p}" \
     --checkpoint-dir="${STATE}/checkpoints" --checkpoint-interval-ms=2000
 done
 # The order stream is reading once its replication slot is active.

@@ -11,6 +11,11 @@ so every run sees the same night and tools/reference.py can say exactly what
 the pipeline must produce.
 
     python3 tools/world.py --out state/world
+    python3 tools/world.py --out state/world --cells 12 --riders-per-cell 90
+
+A bigger night is the same night in more cities: --cells adds cities (named
+city-04 onwards), and the per-city sizes scale with their flags. Every size
+is recorded in manifest.json, which the feeders and the model read.
 
 Writes cells.json, restaurants.jsonl, customers.jsonl, riders.jsonl,
 orders.jsonl (every order with every time in its life), changes.jsonl (the
@@ -265,9 +270,21 @@ def write_jsonl(path, rows):
 
 
 def main():
+    global CELLS, RIDERS_PER_CELL, RESTAURANTS_PER_CELL, CUSTOMERS_PER_CELL, BASE_ORDERS_PER_MIN
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--out", default="state/world")
+    ap.add_argument("--cells", type=int, default=len(CELLS),
+                    help="how many cities (3 by default; more are named city-04 onwards)")
+    ap.add_argument("--riders-per-cell", type=int, default=RIDERS_PER_CELL)
+    ap.add_argument("--restaurants-per-cell", type=int, default=RESTAURANTS_PER_CELL)
+    ap.add_argument("--customers-per-cell", type=int, default=CUSTOMERS_PER_CELL)
+    ap.add_argument("--orders-per-minute", type=float, default=BASE_ORDERS_PER_MIN,
+                    help="per city, before the phase multiplier")
     args = ap.parse_args()
+    if args.cells != len(CELLS):
+        CELLS = (CELLS + [f"city-{i:02d}" for i in range(len(CELLS) + 1, args.cells + 1)])[:args.cells]
+    RIDERS_PER_CELL, RESTAURANTS_PER_CELL = args.riders_per_cell, args.restaurants_per_cell
+    CUSTOMERS_PER_CELL, BASE_ORDERS_PER_MIN = args.customers_per_cell, args.orders_per_minute
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     rng = random.Random(SEED)

@@ -16,15 +16,17 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import hosts  # noqa: E402
+
 ROOT = Path(__file__).resolve().parent.parent
-PORT = os.environ.get("NEO4J_HTTP_PORT", "7474")
 PASSWORD = os.environ.get("NEO4J_PASSWORD", "half-time-pw")
 
 
 def query(statement, parameters=None):
     body = json.dumps({"statement": statement, "parameters": parameters or {}}).encode()
     req = urllib.request.Request(
-        f"http://localhost:{PORT}/db/neo4j/query/v2", body,
+        f"{hosts.neo4j_url()}/db/neo4j/query/v2", body,
         {"Content-Type": "application/json",
          "Authorization": "Basic " + base64.b64encode(f"neo4j:{PASSWORD}".encode()).decode()})
     try:

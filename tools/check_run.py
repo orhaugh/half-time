@@ -11,6 +11,7 @@ pipeline's tail that long to drain before the counts are judged.
 """
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -18,24 +19,23 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import hosts  # noqa: E402
 import reference  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 LAG = 60_000
 
 
-def compose(*args, check=True):
-    return subprocess.run(["docker", "compose", *args], cwd=ROOT, check=check,
-                          capture_output=True, text=True).stdout
+def run(argv, check=True):
+    return subprocess.run(argv, cwd=ROOT, check=check, capture_output=True, text=True).stdout
 
 
 def topic(name):
     """Every committed record of a topic with the broker's LogAppendTime."""
-    out = compose("exec", "-T", "kafka", "/opt/kafka/bin/kafka-console-consumer.sh",
-                  "--bootstrap-server", "kafka:9092", "--topic", name, "--from-beginning",
-                  "--isolation-level", "read_committed", "--timeout-ms", "8000",
-                  "--property", "print.timestamp=true", "--property", "print.partition=true",
-                  check=False)
+    out = run(hosts.kafka_tool("kafka-console-consumer.sh", "--topic", name, "--from-beginning",
+                               "--isolation-level", "read_committed", "--timeout-ms", "8000",
+                               "--property", "print.timestamp=true",
+                               "--property", "print.partition=true"), check=False)
     rows = []
     for line in out.splitlines():
         if not line.startswith(("LogAppendTime:", "CreateTime:")):
@@ -58,16 +58,22 @@ def partition_floor(rows, column):
     return min(last.values()) - LAG if last else 0
 
 
+def topic_count(name):
+    """How many records a topic holds, from its end offsets: for a stream too
+    large to read back, written by a producer that is not transactional."""
+    out = run(hosts.kafka_tool("kafka-get-offsets.sh", "--topic", name), check=False)
+    return sum(int(line.rsplit(":", 1)[1]) for line in out.splitlines() if line.strip())
+
+
 def pg(sql):
-    out = compose("exec", "-T", "postgres", "psql", "-At", "-U", "halftime", "-d", "halftime",
-                  "-c", f"SELECT row_to_json(x) FROM ({sql}) x")
+    out = run(hosts.psql("-At", "-c", f"SELECT row_to_json(x) FROM ({sql}) x"))
     return [json.loads(line) for line in out.splitlines() if line.strip()]
 
 
 def ch(sql):
-    out = compose("exec", "-T", "clickhouse", "clickhouse-client", "--user", "halftime",
-                  "--password", "halftime", "--format", "JSONEachRow",
-                  "--output_format_json_quote_64bit_integers", "0", "--query", sql, check=False)
+    out = run(hosts.clickhouse_client("--format", "JSONEachRow",
+                                      "--output_format_json_quote_64bit_integers", "0",
+                                      "--query", sql), check=False)
     return [json.loads(line) for line in out.splitlines() if line.strip()]
 
 
@@ -140,6 +146,9 @@ def order_changes_keys(rows):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--wait", type=int, default=0, help="seconds to give the pipeline's tail")
+    ap.add_argument("--scale", action="store_true",
+                    help="a large night: count the position reports from the topic's offsets "
+                         "instead of reading them back")
     args = ap.parse_args()
     ref = reference.Reference()
     c = Checks(ref)
@@ -188,10 +197,18 @@ def main():
     for (cell, zone, we), v in got_w.items():
         if zone not in latest or we > latest[zone][0]:
             latest[zone] = (we, v)
-    ok_zp = len(zp) == len(latest) and all(
-        latest.get(r["zone"]) and latest[r["zone"]][0] == r["window_end_ms"]
-        and latest[r["zone"]][1][:3] == (r["demand"], r["supply"], r["multiplier_pct"]) for r in zp)
-    c.judge(f"zone_pricing table: {len(zp)} zones at their latest window", ok_zp)
+    # The table is kept by a second statement of the same job; at the end of
+    # the night it can stand a window or two behind the topic, so it is held
+    # to the topic's row for the window it shows, within the lag of the latest.
+    rows_by = {(r["zone"], r["window_end_ms"]): r for r in zp}
+    consistent = all(
+        got_w.get((r["cell"], r["zone"], r["window_end_ms"]), (None,))[:3] ==
+        (r["demand"], r["supply"], r["multiplier_pct"]) for r in zp)
+    behind = {r["zone"]: (latest[r["zone"]][0] - r["window_end_ms"]) // 60_000 for r in zp if r["zone"] in latest}
+    c.judge(f"zone_pricing table: {len(zp)} zones, each at a window the topic holds with the same values; "
+            f"{sum(1 for b in behind.values() if b == 0)} at the latest window, the rest within "
+            f"{max(behind.values()) if behind else 0} windows of it",
+            consistent and len(zp) == len(latest) and all(b <= 10 for b in behind.values()))
 
     print("quotes: every order priced under the window it was placed in, exactly once")
     priced = topic("orders.priced")
@@ -290,7 +307,7 @@ def main():
         rel = str(committed[0].parent.relative_to(ROOT / "state" / "archive"))
         n = ch(f"SELECT count() AS n FROM file('archive/{rel}/*.parquet', Parquet)")[0]["n"]
         if d == "riders.positions":
-            sent = len(topic("riders.positions"))
+            sent = topic_count("riders.positions") if args.scale else len(topic("riders.positions"))
             c.judge(f"{d}: {len(committed)} files, {n} rows, the topic holds {sent}", n == sent)
         elif d == "dispatch.decisions":
             c.judge(f"{d}: {len(committed)} files, {n} rows, the topic holds {want}", n == want)
@@ -299,7 +316,7 @@ def main():
 
     print("the city graph")
     graph = subprocess.run([sys.executable, "-I", str(ROOT / "tools" / "load_graph.py"), "--check"],
-                           cwd=ROOT, capture_output=True, text=True)
+                           cwd=ROOT, capture_output=True, text=True, env=dict(os.environ))
     print(graph.stdout.rstrip())
     c.ok = c.ok and graph.returncode == 0
 
