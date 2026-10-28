@@ -1,0 +1,6 @@
+# Run state: the generated world, clink's logs and checkpoints, the archive.
+/state/
+/out/
+/.clink/
+__pycache__/
+*.pyc
