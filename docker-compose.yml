@@ -238,7 +238,7 @@ services:
   # The stream on the alert bus, made once the bus is up, and the container
   # the tools run the nats command line in.
   nats-init:
-    image: natsio/nats-box:latest
+    image: natsio/nats-box@sha256:dd57687c32199867bfc42823e935174f37754a4281de957d6717469948b5b18b
     depends_on:
       nats:
         condition: service_healthy

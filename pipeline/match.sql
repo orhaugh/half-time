@@ -6,12 +6,13 @@
 -- announces each event on a topic, keeps the timeline in ClickHouse, and
 -- joins the order stream to the goals: an order placed in the two minutes
 -- from a goal is that goal's. The feed is polled once; the timeline and the
--- join read the topic the job itself writes. The polling source keeps no
--- position clink can restore (a restart polls from the first cursor again,
--- and the feed keeps everything it has released), so the job is at least
--- once throughout: the events are made distinct before the join, the
--- timeline collapses its copies by event, and a goal's orders by goal and
--- order.
+-- join read the topic the job itself writes. The polling source checkpoints
+-- its cursor and re-polls from it after a restart, and the feed honours the
+-- cursor exclusively and keeps everything it has released, so the events
+-- reach the topic exactly once through the transactional sink. The
+-- ClickHouse tables are at least once and collapse their copies by event
+-- and by goal and order; the goals are made distinct before the join, as
+-- the topic is read by a plain consumer.
 
 CREATE TABLE match_feed (
     seq    BIGINT,
@@ -38,10 +39,12 @@ CREATE TABLE match_events (
     detail VARCHAR,
     ts     BIGINT
 ) WITH (
-    connector = 'kafka',
-    format    = 'json',
-    brokers   = 'kafka:9092',
-    topic     = 'match.events'
+    connector          = 'kafka',
+    format             = 'json',
+    brokers            = 'kafka:9092',
+    topic              = 'match.events',
+    delivery_guarantee = 'exactly_once',
+    transactional_id   = 'match-events'
 );
 
 CREATE TABLE match_timeline (
@@ -56,10 +59,11 @@ CREATE TABLE match_timeline (
     host              = 'clickhouse',
     port              = '9000',
     database          = 'halftime',
-    "table"           = 'match_timeline',
-    user              = 'halftime',
-    password          = 'halftime',
-    batch_interval_ms = '500'
+    "table"            = 'match_timeline',
+    user               = 'halftime',
+    password           = 'halftime',
+    batch_interval_ms  = '500',
+    delivery_guarantee = 'at_least_once'
 );
 
 CREATE TABLE order_changes (
@@ -121,10 +125,11 @@ CREATE TABLE goal_orders (
     host              = 'clickhouse',
     port              = '9000',
     database          = 'halftime',
-    "table"           = 'goal_orders',
-    user              = 'halftime',
-    password          = 'halftime',
-    batch_interval_ms = '500'
+    "table"            = 'goal_orders',
+    user               = 'halftime',
+    password           = 'halftime',
+    batch_interval_ms  = '500',
+    delivery_guarantee = 'at_least_once'
 );
 
 EXECUTE STATEMENT SET BEGIN

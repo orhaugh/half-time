@@ -111,10 +111,10 @@ def main():
     wrong = [d for d, s in docs.items() if want_docs.get(d) != (s["name"], s["price_cents"], s["available"])]
     c.judge(f"document values: {len(docs) - len(wrong)} of {len(docs)} as the model says", not wrong)
 
-    print("the match feed: every event announced and kept, and each goal's orders")
+    print("the match feed: every event announced exactly once and kept, and each goal's orders")
     me = topic("match.events")
     want_events = {e["seq"]: (e["kind"], e["minute"], e["ts"]) for e in ref.match}
-    c.at_least_once("match.events topic", [r["seq"] for r in me], want_events)
+    c.exactly_once("match.events topic", [r["seq"] for r in me], want_events)
     wrong = [r for r in me if want_events.get(r["seq"]) != (r["kind"], r["minute"], r["ts"])]
     c.judge(f"event values: {len(me) - len(wrong)} of {len(me)} as the feed says", not wrong)
     tl = ch("SELECT seq, kind, minute, ts_ms FROM halftime.match_timeline")

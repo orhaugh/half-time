@@ -26,7 +26,7 @@ job reads the dispatch archive back.
 It is a deliberately convoluted pipeline, because real ones are. Eighteen
 jobs read and write ten Kafka topics, a PostgreSQL change stream, a MySQL
 change stream, an HTTP feed, two PostgreSQL ledgers and a price table, a
-Neo4j city graph, seven ClickHouse tables, three Parquet archives, a Delta
+Neo4j city graph, eight ClickHouse tables, three Parquet archives, a Delta
 table, two Pulsar topics, a RabbitMQ queue, a NATS stream, two Redis
 keyspaces, a Cassandra table, an OpenSearch index, an InfluxDB bucket and a
 Pushgateway, and the outputs of one job are the inputs of the next. A worker is killed in the
@@ -78,9 +78,12 @@ model that never touched clink.
   that writes a state again changes nothing in either.
 - **Sinks that declare what they are.** clink's planner computes each job's
   guarantee from its sources and sinks and refuses a declaration the path
-  cannot honour: a sink over the Pulsar bus or the polled feed cannot claim
-  exactly once, because neither source replays from a position clink
-  restores, and the SQL says so instead of pretending.
+  cannot honour. A sink over the Pulsar bus cannot claim exactly once,
+  because the bus redelivers rather than replays, and the SQL says so. The
+  polled match feed checkpoints its cursor and the feed honours it, so its
+  events reach Kafka exactly once through a transactional sink, and the
+  planner accepts that declaration because the connector's record now says
+  what its code does.
 - **The archive is an input too.** After the night a bounded job reads the
   dispatch archive's Parquet files back into a table beside the live one.
 - **Failure on purpose.** A worker is killed with SIGKILL at half-time, a
@@ -115,7 +118,7 @@ flowchart LR
         KE["kitchen.events"]
         MF["the match feed<br/>HTTP"]
     end
-    subgraph clink["clink: twelve jobs"]
+    subgraph clink["clink: eighteen jobs"]
         O["orders<br/>change stream, exactly once"]
         P["pricing<br/>5 min windows, every minute"]
         Q["quotes<br/>the price when placed"]
@@ -214,7 +217,7 @@ flowchart LR
 | `ops` | `dispatch.decisions`, `kitchen.alerts` | the RabbitMQ queue `ops.escalations`, the Pulsar topic `partners.escalations`, the NATS subject `ops.alerts` | at least once |
 | `tracker` | `orders.changes`, `dispatch.decisions` | the Redis keys `order:` and `rider-of:`; `order_history` in Cassandra | upsert; at least once by key |
 | `search` | `menus.changes` | the OpenSearch index `menus`, one document per change | at least once, by document |
-| `match` | the match feed over HTTP, `match.events`, `orders.changes` | `match.events`; `match_timeline` and `goal_orders` in ClickHouse | at least once |
+| `match` | the match feed over HTTP, `match.events`, `orders.changes` | `match.events`; `match_timeline` and `goal_orders` in ClickHouse | exactly once; at least once |
 | `lake` | `orders.changes` | the Delta table `lake/orders.changes` | at least once |
 | `telemetry` | `riders.positions` | the InfluxDB measurement `rider_position` | at least once, one point per series and time |
 | `gauges` | `pricing.multipliers` | the Pushgateway gauge `halftime_zone_multiplier_pct`, scraped by Prometheus | at least once |
@@ -279,9 +282,9 @@ checks run each system's own tools inside its container, Kafka's in the
 broker's, `psql` in PostgreSQL's, `clickhouse-client` in ClickHouse's,
 `mysql`, `pulsar-client`, `redis-cli` and `cqlsh` in theirs, the `nats`
 command line in a throwaway container on the compose network, and RabbitMQ,
-OpenSearch, InfluxDB and the Pushgateway over HTTP. The sixteen containers
-want about eight gigabytes of memory between them; Pulsar, Cassandra and
-OpenSearch take most of it.
+OpenSearch, InfluxDB and the Pushgateway over HTTP. The fifteen containers
+want about eight gigabytes of memory between them; Kafka, Cassandra,
+ClickHouse, OpenSearch and Pulsar take most of it.
 
 ```bash
 CLINK_BIN_DIR=/path/to/clink/build ./run.sh
@@ -370,7 +373,7 @@ systems around the core:
 | the Redis keys | every order at its final state; every assigned order's rider |
 | the Cassandra table | every change to every order at least once, the copies counted |
 | the OpenSearch index | every menu change as one document, with the values written |
-| `match.events`, `match_timeline`, `goal_orders` | every event at least once; every order placed in the two minutes from a goal, against that goal |
+| `match.events`, `match_timeline`, `goal_orders` | every event once on the topic and at least once in the timeline; every order placed in the two minutes from a goal, against that goal |
 | the Delta table | every change at least once, read back by ClickHouse from the files the log commits |
 | the InfluxDB measurement | one point per report, exactly: the store keeps one value per series and time |
 | the Pushgateway | each zone's multiplier equal to the topic's row for the window it names, at or near the latest |
@@ -410,11 +413,11 @@ shorter setting cost one quote its multiplier in an earlier run.
 every container from `docker stats` through a run, and the run ends with the
 figures. On one machine at thirty times real time, with the scenes, the
 seventeen jobs and the backfill ran in four clink processes whose peaks
-summed to 1.5 GiB: the Coordinator 47 MiB, its standby 40 MiB, the two
-Workers 775 MiB and 643 MiB (means of 362 MiB and 238 MiB), at 31 and 17
-per cent of a core on average. The sixteen systems they fed peaked at
-8.4 GiB between them; Kafka, Cassandra and ClickHouse each above a
-gigabyte. The clink binaries were a host debug build; the runtime image is
+summed to 1.0 GiB: the Coordinator 43 MiB, its standby 39 MiB, the two
+Workers 501 MiB and 448 MiB (means of 232 MiB and 209 MiB), at 21 and 19
+per cent of a core on average. The fifteen systems they fed peaked at
+8.2 GiB between them; Kafka, Cassandra, ClickHouse, OpenSearch and Pulsar
+each above a gigabyte. The clink binaries were a host debug build; the runtime image is
 a release build and does better on both counts. A run without the scenes
 (`SCENES=0`) on an otherwise quiet machine gives the cleaner figure.
 
@@ -440,16 +443,57 @@ there before the round was called done:
   string in a `BIGINT` column, through Kafka and into OpenSearch.
 - The Redis upsert sink wrote `order:"lisbon-o00940"\x1f` where its page
   promised `order:lisbon-o00940`.
+- The HTTP polling source's capability record said it kept no cursor and
+  sat outside checkpointing, while its code checkpoints the cursor and
+  re-polls from it; the record barred a job over the feed from declaring
+  any guarantee.
 
 Still open, and noted here rather than hidden: SQL jobs declare no rescale
-bounds, so a running SQL job cannot be rescaled live; the HTTP polling
-source's capability record says it keeps no cursor while its code
-checkpoints one, so a job over it cannot declare a guarantee; the Pulsar
-source hands a restarted consumer its unacknowledged messages after the
-newer ones, where a seek to the oldest of them would replay in order; the
+bounds, so a running SQL job cannot be rescaled live; the Pulsar source
+hands a restarted consumer its unacknowledged messages after the newer
+ones, where a seek to the oldest of them would replay in order; the
 protocol trace's sink events carry no job id, so a run of many jobs cannot
 be validated against the specification job by job; and MQTT and MongoDB
 are not reachable from SQL.
+
+## Dissecting it
+
+Everything the run does is in plain files, and clink shows its working.
+With the stack up after a run (`run.sh` leaves it up):
+
+- A job's plan, without running it:
+  `clink run pipeline/dispatch.sql --explain` prints the logical plan the
+  planner built, join shape and all.
+- A job's guarantee, as the planner computed it from its sources and sinks:
+  `curl -s localhost:8081/api/v1/jobs/4 | python3 -m json.tool` shows
+  `delivery_guarantee`, what limits it and the reasoning
+  (`guarantee_reasons`); try the kitchen job, held to at least once, beside
+  the dispatcher, exactly once. Job ids follow the submission order in
+  `run.sh`. After the failover the Coordinator is on port 8084.
+- What each operator received, emitted and dropped:
+  `curl -s localhost:8081/api/v1/jobs/4/operators`. `run.sh` keeps the
+  kitchen job's counters from before the failover and from the end under
+  `state/run/kitchen-operators-*.json`.
+- The state inside a checkpoint: `clink state-cat
+  --file state/run/checkpoints/_state/10/v1/1/checkpoint-<n>.snap` dumps the
+  kitchen job's `distinct` set (one entry per tablet event) and the pattern
+  operator's held rows (`__cep_held__`), keyed by the restaurant's key
+  group; `clink state-diff` compares two checkpoints.
+- The model the checks compare against: `python3 tools/reference.py`
+  prints its counts, and `tools/reference.py` mirrors each job's rules in
+  plain Python, one function per job, so a check line can be traced to the
+  rule it holds.
+- The protocol trace: `state/run/traces/*.ndjson`, one JSON object per
+  protocol step per process, in the vocabulary of `formal/trace/events.txt`
+  in the clink repository.
+- The dashboards: Grafana at http://localhost:23000 shows clink's own
+  metrics (memory, CPU, checkpoints, subtasks per Worker) beside the zone
+  multipliers the gauges job pushes; Prometheus at http://localhost:29090
+  has the raw series.
+- The systems themselves: every container keeps its native tools, as the
+  checks use them (`docker compose exec kafka ...`, `psql`,
+  `clickhouse-client`, `cqlsh`, `redis-cli`, `pulsar-client`), and
+  `tools/hosts.py` is the one place that knows where each one is.
 
 ## What is generated
 

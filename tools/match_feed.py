@@ -5,9 +5,10 @@
 
 GET /events?since=<seq> answers {"items": [...]} with every event released so
 far whose seq is above the cursor, ascending, which is what clink's polling
-source asks for. The feed keeps everything it has released, so a job that
-starts again from its first cursor reads the same events again. GET /health
-answers once the server is up.
+source asks for: the cursor is exclusive, and the feed keeps everything it
+has released, so a source that re-polls from a checkpointed cursor after a
+restart reads exactly what it had not yet seen. GET /health answers once the
+server is up.
 """
 import argparse
 import json

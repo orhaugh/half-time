@@ -40,7 +40,7 @@ services:
       timeout: 5s
       retries: 40
   nats-init:
-    image: natsio/nats-box:latest
+    image: natsio/nats-box@sha256:dd57687c32199867bfc42823e935174f37754a4281de957d6717469948b5b18b
     network_mode: host
     depends_on:
       nats:

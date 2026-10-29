@@ -36,7 +36,11 @@ def clink_sample(name, port):
     return out if "rss_bytes" in out else None
 
 
+PROJECT = Path(__file__).resolve().parent.parent.name  # the compose project: this directory's name
+
+
 def docker_sample():
+    """Every container of this compose project, and none of anything else on the machine."""
     try:
         out = subprocess.run(["docker", "stats", "--no-stream", "--format", "{{json .}}"],
                              capture_output=True, text=True, timeout=20).stdout
@@ -47,6 +51,8 @@ def docker_sample():
         if not line.strip():
             continue
         s = json.loads(line)
+        if not s["Name"].startswith(PROJECT + "-"):
+            continue
         rows.append({"container": s["Name"], "cpu_pct": float(s["CPUPerc"].rstrip("%") or 0),
                      "mem_bytes": parse_size(s["MemUsage"].split("/")[0])})
     return rows

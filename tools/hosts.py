@@ -70,7 +70,7 @@ def neo4j_url():
 #    HT_CASSANDRA       order history     host:port   default cassandra:9042
 MYSQL_IMAGE = "mysql:8.0"
 PULSAR_IMAGE = "apachepulsar/pulsar:3.3.1"
-NATS_BOX_IMAGE = "natsio/nats-box:latest"
+NATS_BOX_IMAGE = "natsio/nats-box@sha256:dd57687c32199867bfc42823e935174f37754a4281de957d6717469948b5b18b"
 REDIS_IMAGE = "redis:7"
 CASSANDRA_IMAGE = "cassandra:4"
 

@@ -5,7 +5,7 @@
 -- binary log, the existing rows first as a snapshot taken at a consistent
 -- position and then every change, and writes each as one record, with what
 -- changed. The sink is transactional, committed with the job's checkpoints;
--- a later round reads the stream into search.
+-- pipeline/search.sql indexes the stream.
 
 CREATE TABLE menu_store (
     restaurant_id VARCHAR,

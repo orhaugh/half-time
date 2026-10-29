@@ -5,9 +5,9 @@
 -- riders' reports say where every rider was from three minutes before the
 -- order to two minutes after it. The nearest report in those zones within
 -- 1,500 m of the restaurant wins, the lower rider id on a tie, and an order
--- no rider was near is escalated. The
--- decision is made at decide_at, two minutes after the order, once the
--- riders' reports up to then are in, and is published exactly once.
+-- no rider was near is escalated. The decision is made at decide_at, two
+-- minutes after the order, once the riders' reports up to then are in, and
+-- is published exactly once.
 -- pipeline/ledgers.sql pays the rider from it when the order is delivered.
 
 CREATE TABLE priced_orders (

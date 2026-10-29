@@ -26,9 +26,10 @@
 # standby Coordinator stands by from the start; at minute 75 the gauges job
 # is stopped at a savepoint and resubmitted from it; at minute 95 the leading
 # Coordinator is killed and the standby takes over, with every job recovered
-# from its checkpoints. Every clink process records its protocol trace, and
-# when a clink checkout is at hand the trace is checked against the
-# exactly-once specification after the stores are.
+# from its checkpoints. Every clink process records its protocol trace under
+# state/run/traces; TRACE_CHECK=1 hands it to the exactly-once
+# specification's validator after the stores are checked (see the README for
+# why that is opt-in today).
 set -euo pipefail
 cd "$(dirname "$0")"
 ROOT="$(pwd)"
