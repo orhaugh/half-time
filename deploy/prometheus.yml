@@ -1,0 +1,18 @@
+# Prometheus scrapes clink's own /metrics on the Coordinator and the two
+# Workers, which run on the host, and the Pushgateway the gauges job pushes
+# each zone's multiplier to. On a rig the targets are the nodes' addresses.
+global:
+  scrape_interval: 5s
+scrape_configs:
+  - job_name: clink
+    static_configs:
+      - targets: ["host.docker.internal:8081", "host.docker.internal:8084"]
+        labels:
+          role: coordinator
+      - targets: ["host.docker.internal:18082", "host.docker.internal:18083"]
+        labels:
+          role: worker
+  - job_name: pushgateway
+    honor_labels: true
+    static_configs:
+      - targets: ["pushgateway:9091"]

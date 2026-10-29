@@ -81,6 +81,21 @@ CANCEL_SHARE = 0.04
 RIDER_SPEED_M_S = 4.0
 HOME_RANGE_M = 1200  # a rider further than this from their restaurant heads back
 
+# The kitchens and the menus (round 2), drawn apart from the streams above so
+# those stay as they were.
+MENU_ITEMS = 8                      # dishes on each menu
+MENU_CHANGES = (3, 7)               # price moves and sell-outs per restaurant through the night
+BOUNCE_RUN = [1, 2, 3, 3, 4, 5, 6]  # requests an overloaded kitchen declines in a row
+BOUNCE_SHARE = 0.5                  # the chance a busy kitchen does, in a busy minute
+BOUNCE_FROM = 1.5                   # a kitchen is overloaded from this phase multiplier
+ALERT_RUN = 3                       # consecutive bounces that raise an alert
+GOAL_SURGE_MS = 2 * MIN             # the orders placed this long after a goal are its surge
+KITCHEN_LAG_MS = 45 * MIN           # the tablet bus's lateness allowance (pipeline/kitchen.sql)
+DISHES = ["margherita", "pad thai", "bibimbap", "shawarma", "ramen", "pho", "jollof rice",
+          "nyama choma", "bacalhau", "francesinha", "okonomiyaki", "takoyaki", "biryani",
+          "falafel wrap", "poke bowl", "lamb tagine", "pierogi", "arepas", "ceviche",
+          "katsu curry", "moussaka", "injera platter", "pastel de nata", "mochi"]
+
 
 def phase_multiplier(minute):
     m = 0.0
@@ -263,6 +278,100 @@ def changes_of(order):
     return out
 
 
+def menus(rng, restaurants):
+    """Every restaurant's menu as the legacy system holds it before the night,
+    and the changes made to it during the night: a price moved, a dish sold out
+    or back on."""
+    items, changes = [], []
+    opened = T0 + START_MIN * MIN - 60 * MIN
+    for r in restaurants:
+        menu = []
+        for j, name in enumerate(rng.sample(DISHES, MENU_ITEMS)):
+            item = {"restaurant_id": r["restaurant_id"], "item_id": f"i{j:02d}", "name": name,
+                    "price_cents": rng.randrange(400, 2600, 50), "available": 1, "updated_at": opened}
+            items.append(item)
+            menu.append(dict(item))
+        # Never before kick-off: the change stream's snapshot is taken as the
+        # jobs start, and a change made before it would be part of the snapshot.
+        for minute in sorted(rng.randrange(0, LAST_ORDER_MIN) for _ in range(rng.randint(*MENU_CHANGES))):
+            item = rng.choice(menu)
+            if rng.random() < 0.4:
+                item["available"] = 1 - item["available"]
+            else:
+                item["price_cents"] = max(200, item["price_cents"] + rng.choice([-100, -50, 50, 100, 150, 200]))
+            item["updated_at"] = T0 + minute * MIN + rng.randrange(0, MIN)
+            changes.append(dict(item))
+    changes.sort(key=lambda c: (c["updated_at"], c["restaurant_id"], c["item_id"]))
+    last = {}
+    for c in changes:  # strictly later than the change before to the same item
+        key = (c["restaurant_id"], c["item_id"])
+        if c["updated_at"] <= last.get(key, -1):
+            c["updated_at"] = last[key] + 1
+        last[key] = c["updated_at"]
+    return items, changes
+
+
+def kitchen(rng, orders, restaurants):
+    """The restaurant tablets' events: each order accepted and ready, and, when a
+    kitchen is overloaded, requests declined in a row, which the platform never
+    turned into orders."""
+    by_id = {r["restaurant_id"]: r for r in restaurants}
+    events = []
+
+    def add(order_id, r, status, ts):
+        events.append({"event_id": f"k{len(events) + 1:06d}", "order_id": order_id,
+                       "restaurant_id": r["restaurant_id"], "cell": r["cell"], "status": status, "ts": ts})
+
+    for o in orders:
+        r = by_id[o["restaurant_id"]]
+        if o["accepted_at"] is not None:
+            add(o["order_id"], r, "accepted", o["accepted_at"] + rng.randrange(0, 1500))
+        if o["picked_up_at"] is not None:
+            add(o["order_id"], r, "ready", o["picked_up_at"] - rng.randrange(10_000, 90_000))
+    n = 0
+    for r in restaurants:
+        if r["weight"] < 3:
+            continue
+        for minute in range(START_MIN, LAST_ORDER_MIN):
+            if phase_multiplier(minute) < BOUNCE_FROM or rng.random() >= BOUNCE_SHARE:
+                continue
+            ts = T0 + minute * MIN + rng.randrange(0, MIN)
+            for _ in range(rng.choice(BOUNCE_RUN)):
+                n += 1
+                add(f"{r['cell']}-q{n:05d}", r, "bounced", ts)
+                ts += rng.randrange(5_000, 25_000)
+    # Strictly later than the event before at the same restaurant, so the
+    # order the pattern sees is the order the model sees.
+    events.sort(key=lambda e: (e["restaurant_id"], e["ts"], e["event_id"]))
+    last = {}
+    for e in events:
+        if e["ts"] <= last.get(e["restaurant_id"], -1):
+            e["ts"] = last[e["restaurant_id"]] + 1
+        last[e["restaurant_id"]] = e["ts"]
+    events.sort(key=lambda e: (e["ts"], e["event_id"]))
+    return events
+
+
+def match_events():
+    """The broadcaster's feed: what happened on the pitch, when. A goal's time
+    is the start of its minute, which is when the orders surge."""
+    out = []
+    kinds = {0: ("kick_off", "the first half"), 45: ("half_time", "the break"), 60: ("second_half", "play resumes"),
+             90: ("extra_time", "still level"), 120: ("penalties", "a shoot-out"), 125: ("final_whistle", "it is over")}
+    score = [0, 0]
+    for minute in sorted(set(kinds) | set(GOALS)):
+        if minute in GOALS:
+            score[len(out) % 2] += 1
+            out.append({"minute": minute, "kind": "goal", "detail": f"{score[0]}-{score[1]}"})
+        if minute in kinds:
+            kind, detail = kinds[minute]
+            out.append({"minute": minute, "kind": kind, "detail": detail})
+    for i, e in enumerate(out, start=1):
+        e["seq"] = i
+        e["ts"] = T0 + e["minute"] * MIN
+    return out
+
+
 def write_jsonl(path, rows):
     with open(path, "w") as f:
         for r in rows:
@@ -293,6 +402,9 @@ def main():
     orders = order_book(rng, restaurants, customers)
     changes = [c for o in orders for c in changes_of(o)]
     changes.sort(key=lambda c: (c["updated_at"], c["order_id"]))
+    rng2 = random.Random(SEED + 1)
+    items, menu_changes = menus(rng2, restaurants)
+    tablet = kitchen(rng2, orders, restaurants)
     (out / "cells.json").write_text(json.dumps(cells, indent=1))
     write_jsonl(out / "restaurants.jsonl", restaurants)
     write_jsonl(out / "customers.jsonl", customers)
@@ -300,11 +412,18 @@ def main():
     write_jsonl(out / "orders.jsonl", orders)
     write_jsonl(out / "changes.jsonl", changes)
     write_jsonl(out / "pings.jsonl", pings)
+    write_jsonl(out / "menus.jsonl", items)
+    write_jsonl(out / "menu_changes.jsonl", menu_changes)
+    write_jsonl(out / "kitchen.jsonl", tablet)
+    write_jsonl(out / "match.jsonl", match_events())
     cancelled = sum(1 for o in orders if o["cancelled_at"] is not None)
+    bounced = sum(1 for e in tablet if e["status"] == "bounced")
     manifest = {"seed": SEED, "t0_ms": T0, "cells": CELLS, "phases": PHASES, "goals": GOALS,
                 "restaurants": len(restaurants), "customers": len(customers),
                 "riders": len(riders), "orders": len(orders), "cancelled": cancelled,
                 "changes": len(changes), "pings": len(pings),
+                "menu_items": len(items), "menu_changes": len(menu_changes),
+                "kitchen_events": len(tablet), "bounces": bounced,
                 "first_ms": T0 + START_MIN * MIN, "last_order_ms": orders[-1]["placed_at"],
                 "pings_until_ms": T0 + PINGS_UNTIL_MIN * MIN}
     (out / "manifest.json").write_text(json.dumps(manifest, indent=1))
@@ -314,6 +433,8 @@ def main():
           f"{len(customers)} customers -> {len(orders)} orders ({cancelled} cancelled), "
           f"{len(changes)} order changes, {len(pings)} position reports")
     print("orders by phase: " + ", ".join(f"{k} {v}" for k, v in per_phase.items()))
+    print(f"the kitchens: {len(items)} menu items, {len(menu_changes)} menu changes, "
+          f"{len(tablet)} tablet events of which {bounced} bounces")
 
 
 if __name__ == "__main__":

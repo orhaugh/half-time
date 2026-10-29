@@ -1,0 +1,30 @@
+# A clink Coordinator from the runtime image, on a host of its own. Two
+# hosts run this file; the leader lock in the shared HA directory decides
+# which leads, and the other stands by. The HA directory is on the NFS share
+# so both, and every Worker, see it; the Coordinator cannot prove an NFS
+# mount honours locks between hosts, so it is told to accept that (NFSv4
+# does). The checkpoints and the protocol trace live on the same share.
+services:
+  clink-coordinator:
+    image: ${CLINK_IMAGE:-ghcr.io/orhaugh/clink-runtime:main}
+    container_name: clink-coordinator
+    network_mode: host
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+    command:
+      - --role=coordinator
+      - --port=6123
+      - --bind-host=0.0.0.0
+      - --advertise-host=${PRIVATE_IP}
+      - --http-port=8081
+      - --http-bind=0.0.0.0
+      - --ha-dir=/ht/state/ha
+      - --ha-allow-unsafe-locks
+      - --restart-drain-timeout-ms=${RESTART_DRAIN_TIMEOUT_MS:-120000}
+    environment:
+      CLINK_PROTOCOL_TRACE_DIR: /ht/state/traces
+    volumes:
+      - /ht/state:/ht/state
+    restart: "no"

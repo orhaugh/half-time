@@ -41,11 +41,16 @@ class Reference:
         self.orders = rows("orders.jsonl")
         self.changes = rows("changes.jsonl")
         self.pings = rows("pings.jsonl")
+        self.kitchen = rows("kitchen.jsonl")
+        self.menus = rows("menus.jsonl")
+        self.menu_changes = rows("menu_changes.jsonl")
+        self.match = rows("match.jsonl")
         # Watermarks at the end of the night: the latest time each stream
         # reached, less the lag every table declares.
         lag = 60_000
         self.wm_pings = max(p["ts"] for p in self.pings) - lag
         self.wm_changes = max(c["updated_at"] for c in self.changes) - lag
+        self.wm_kitchen = max(e["ts"] for e in self.kitchen) - W.KITCHEN_LAG_MS
         self._windows = None
         self._quotes = None
         self._decisions = None
@@ -201,6 +206,73 @@ class Reference:
             out[rider] = rows_
         return out
 
+    # pipeline/menus.sql
+    def menu_stream(self):
+        """(restaurant_id, item_id, updated_at, op) -> (name, price_cents, available):
+        the menu store's rows as the night began, then every change."""
+        out = {(m["restaurant_id"], m["item_id"], m["updated_at"], "insert"):
+               (m["name"], m["price_cents"], m["available"]) for m in self.menus}
+        for c in self.menu_changes:
+            out[(c["restaurant_id"], c["item_id"], c["updated_at"], "update")] = (c["name"], c["price_cents"], c["available"])
+        return out
+
+    def menu_final(self):
+        """(restaurant_id, item_id) -> (name, price_cents, available, updated_at) at the end."""
+        out = {(m["restaurant_id"], m["item_id"]): (m["name"], m["price_cents"], m["available"], m["updated_at"])
+               for m in self.menus}
+        for c in self.menu_changes:  # in time order
+            out[(c["restaurant_id"], c["item_id"])] = (c["name"], c["price_cents"], c["available"], c["updated_at"])
+        return out
+
+    # pipeline/kitchen.sql
+    def alerts(self):
+        """(restaurant_id, first_at) -> (cell, first_order, last_order, last_at): three
+        bounces in a row at a restaurant, in event-time order, each bounce in one
+        alert at most."""
+        by_restaurant = defaultdict(list)
+        for e in self.kitchen:
+            by_restaurant[e["restaurant_id"]].append(e)
+        out = {}
+        for rid, events in by_restaurant.items():
+            events.sort(key=lambda e: (e["ts"], e["event_id"]))
+            run = []
+            for e in events:
+                if e["status"] != "bounced":
+                    run = []
+                    continue
+                run.append(e)
+                if len(run) == W.ALERT_RUN:
+                    out[(rid, run[0]["ts"])] = (run[0]["cell"], run[0]["order_id"], run[-1]["order_id"], run[-1]["ts"])
+                    run = []
+        return out
+
+    def late_alerts(self):
+        """The alerts the tablet stream's watermark had not passed when the stream
+        ended; the idle timeout may release them."""
+        return {k for k, v in self.alerts().items() if v[3] >= self.wm_kitchen}
+
+    # pipeline/match.sql
+    def goal_orders(self):
+        """(goal_seq, order_id) -> (goal_minute, cell, placed_at): the orders placed
+        in the two minutes from each goal."""
+        out = {}
+        for g in self.match:
+            if g["kind"] != "goal":
+                continue
+            for o in self.orders:
+                if g["ts"] <= o["placed_at"] <= g["ts"] + W.GOAL_SURGE_MS:
+                    out[(g["seq"], o["order_id"])] = (g["minute"], o["cell"], o["placed_at"])
+        return out
+
+    # pipeline/gauges.sql
+    def latest_windows(self):
+        """zone -> (cell, window_end, multiplier_pct): each zone's latest closed window."""
+        out = {}
+        for (cell, zone, we), v in self.windows().items():
+            if zone not in out or we > out[zone][1]:
+                out[zone] = (cell, we, v[2])
+        return out
+
 
 def main():
     ref = Reference()
@@ -218,6 +290,13 @@ def main():
     print(f"  payouts: {len(ref.payouts())}, {sum(p[1] for p in ref.payouts().values())} cents")
     print(f"  credits: {late} late deliveries, {len(credits) - late} cancellations, "
           f"{sum(c[2] for c in credits)} cents")
+    bounced = sum(1 for e in ref.kitchen if e["status"] == "bounced")
+    goals = sum(1 for e in ref.match if e["kind"] == "goal")
+    print(f"  match feed: {len(ref.match)} events, {goals} goals; orders in the two minutes after a goal: "
+          f"{len(ref.goal_orders())}")
+    print(f"  menu stream: {len(ref.menus)} items, {len(ref.menu_changes)} changes; tablet events: "
+          f"{len(ref.kitchen)}, {bounced} bounces; alerts: {len(ref.alerts())}, "
+          f"{len(ref.late_alerts())} at the end of the stream")
 
 
 if __name__ == "__main__":

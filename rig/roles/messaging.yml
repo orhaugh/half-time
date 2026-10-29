@@ -1,0 +1,79 @@
+# The tablets' bus, the desk's queue, the alert bus, the tracker and the
+# order history, on one host. Pulsar and Cassandra advertise the host's
+# private address, which is the one every other host can reach.
+services:
+  pulsar:
+    image: apachepulsar/pulsar:3.3.1
+    container_name: pulsar
+    network_mode: host
+    command: ["bash", "-c", "bin/apply-config-from-env.py conf/standalone.conf && exec bin/pulsar standalone -nfw -nss"]
+    environment:
+      PULSAR_MEM: "-Xms1g -Xmx1g -XX:MaxDirectMemorySize=512m"
+      PULSAR_PREFIX_advertisedAddress: ${PRIVATE_IP}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/admin/v2/brokers/health || exit 1"]
+      interval: 5s
+      timeout: 10s
+      retries: 60
+      start_period: 30s
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: rabbitmq
+    network_mode: host
+    environment:
+      RABBITMQ_DEFAULT_USER: halftime
+      RABBITMQ_DEFAULT_PASS: halftime
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 10s
+      retries: 60
+      start_period: 15s
+  nats:
+    image: nats:2.10-alpine
+    container_name: nats
+    network_mode: host
+    command: ["-js", "-m", "8222"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8222/healthz || exit 1"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+  nats-init:
+    image: natsio/nats-box:latest
+    network_mode: host
+    depends_on:
+      nats:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        nats --server nats://127.0.0.1:4222 stream info ALERTS >/dev/null 2>&1 || \
+          nats --server nats://127.0.0.1:4222 stream add ALERTS --subjects ops.alerts --storage file --defaults
+    restart: "no"
+  redis:
+    image: redis:7
+    container_name: redis
+    network_mode: host
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+  cassandra:
+    image: cassandra:4
+    container_name: cassandra
+    network_mode: host
+    environment:
+      MAX_HEAP_SIZE: 2G
+      HEAP_NEWSIZE: 400M
+      CASSANDRA_LISTEN_ADDRESS: ${PRIVATE_IP}
+      CASSANDRA_RPC_ADDRESS: 0.0.0.0
+      CASSANDRA_BROADCAST_RPC_ADDRESS: ${PRIVATE_IP}
+    healthcheck:
+      test: ["CMD", "cqlsh", "-e", "SELECT cluster_name FROM system.local"]
+      interval: 10s
+      timeout: 15s
+      retries: 60
+      start_period: 60s

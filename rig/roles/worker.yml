@@ -1,0 +1,31 @@
+# A clink Worker from the runtime image. It finds the leading Coordinator
+# through the shared HA directory, so a takeover carries it along, and
+# advertises its private address, the one its peers dial for data. SLOTS is
+# the parallelism this host offers; the run's total is SLOTS times the
+# number of Workers.
+services:
+  clink-worker:
+    image: ${CLINK_IMAGE:-ghcr.io/orhaugh/clink-runtime:main}
+    container_name: clink-worker
+    network_mode: host
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+    command:
+      - --role=worker
+      - --id=${WORKER_ID}
+      - --ha-dir=/ht/state/ha
+      - --port=6124
+      - --data-host=${PRIVATE_IP}
+      - --slots=${SLOTS:-32}
+      - --checkpoint-num-retained=3
+      - --http-port=8082
+      - --http-bind=0.0.0.0
+    environment:
+      CLINK_DATA_BIND_HOST: 0.0.0.0
+      CLINK_PROTOCOL_TRACE_DIR: /ht/state/traces
+      NEO4J_PASSWORD: half-time-pw
+    volumes:
+      - /ht/state:/ht/state
+    restart: "no"

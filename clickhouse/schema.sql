@@ -100,3 +100,49 @@ CREATE TABLE IF NOT EXISTS halftime.customer_spend
 )
 ENGINE = ReplacingMergeTree
 ORDER BY (customer_id, order_id);
+
+-- The broadcaster's feed as the match job carried it: one row per event.
+-- Written at least once; the key collapses the copies.
+CREATE TABLE IF NOT EXISTS halftime.match_timeline
+(
+    seq    Int64,
+    minute Int64,
+    kind   LowCardinality(String),
+    detail String,
+    ts_ms  Int64,
+    ts     DateTime64(3, 'UTC') MATERIALIZED fromUnixTimestamp64Milli(ts_ms)
+)
+ENGINE = ReplacingMergeTree
+ORDER BY seq;
+
+-- The orders placed in the two minutes after each goal: the surge, order by
+-- order.
+CREATE TABLE IF NOT EXISTS halftime.goal_orders
+(
+    goal_seq     Int64,
+    goal_minute  Int64,
+    order_id     String,
+    cell         LowCardinality(String),
+    placed_at_ms Int64
+)
+ENGINE = ReplacingMergeTree
+ORDER BY (goal_seq, order_id);
+
+-- The dispatch decisions read back from the Parquet archive after the night,
+-- by a bounded job, to set beside the live table.
+CREATE TABLE IF NOT EXISTS halftime.dispatch_decisions_backfill
+(
+    order_id       String,
+    kind           LowCardinality(String),
+    rider_id       Nullable(Int64),
+    candidates     Int64,
+    score          Int64,
+    multiplier_pct Int64,
+    fee_cents      Int64,
+    cell           LowCardinality(String),
+    zone           LowCardinality(String),
+    restaurant_id  LowCardinality(String),
+    placed_at_ms   Int64
+)
+ENGINE = ReplacingMergeTree
+ORDER BY order_id;

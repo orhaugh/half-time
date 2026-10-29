@@ -4,3 +4,7 @@
 /.clink/
 __pycache__/
 *.pyc
+
+# A rig run: its inventory (addresses of a run that bills) and the files run.sh generates for it.
+rig/inventory/
+rig/generated/

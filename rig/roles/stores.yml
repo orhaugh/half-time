@@ -1,0 +1,72 @@
+# The order store, the city graph, the analytics store and the menu store,
+# on one host, each on its native port. The archive directory is the shared
+# /ht/state, so ClickHouse reads the Parquet and Delta files back as it does
+# on one machine.
+services:
+  postgres:
+    image: postgres:16.15
+    container_name: postgres
+    network_mode: host
+    command: >-
+      postgres -c wal_level=logical -c max_replication_slots=8 -c max_wal_senders=8
+      -c max_prepared_transactions=32 -c track_commit_timestamp=on -c listen_addresses=*
+    environment:
+      POSTGRES_USER: halftime
+      POSTGRES_PASSWORD: halftime
+      POSTGRES_DB: halftime
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U halftime -d halftime"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+  neo4j:
+    image: neo4j:2026.09.0-community
+    container_name: neo4j
+    network_mode: host
+    environment:
+      NEO4J_AUTH: neo4j/half-time-pw
+      NEO4J_server_default__listen__address: 0.0.0.0
+      NEO4J_server_memory_heap_max__size: 1g
+      NEO4J_server_memory_pagecache_size: 256m
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:7474/ || exit 1"]
+      interval: 2s
+      timeout: 5s
+      retries: 90
+      start_period: 5s
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.3
+    container_name: clickhouse
+    network_mode: host
+    environment:
+      CLICKHOUSE_USER: halftime
+      CLICKHOUSE_PASSWORD: halftime
+      CLICKHOUSE_DB: halftime
+    ulimits:
+      nofile: 262144
+    volumes:
+      - /ht/state/archive:/var/lib/clickhouse/user_files/archive
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user halftime --password halftime --query 'SELECT 1' >/dev/null 2>&1"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+  mysql:
+    image: mysql:8.0
+    container_name: mysql
+    network_mode: host
+    command:
+      - --server-id=1
+      - --log-bin=mysql-bin
+      - --binlog-format=ROW
+      - --binlog-row-image=FULL
+      - --bind-address=0.0.0.0
+    environment:
+      MYSQL_ROOT_PASSWORD: halftime
+      MYSQL_DATABASE: halftime
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=halftime mysqladmin ping -h 127.0.0.1 -u root --silent"]
+      interval: 3s
+      timeout: 5s
+      retries: 60
+      start_period: 20s
