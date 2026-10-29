@@ -205,7 +205,7 @@ flowchart LR
 | Job | Reads | Writes | Guarantee |
 | --- | --- | --- | --- |
 | `orders` | the order table's replication stream | `orders.changes` | exactly once |
-| `pricing` | `orders.changes`, `riders.positions` | `pricing.multipliers`; `zone_pricing` in PostgreSQL | exactly once; upsert |
+| `pricing` | `orders.changes`, `riders.positions`; its own `pricing.multipliers` for the table | `pricing.multipliers`; `zone_pricing` in PostgreSQL | exactly once; upsert |
 | `quotes` | `orders.changes`, `pricing.multipliers` | `orders.priced` | exactly once |
 | `dispatch` | `orders.priced`, `riders.positions`, the Neo4j graph | `dispatch.decisions` | exactly once |
 | `ledgers` | `orders.changes`, `dispatch.decisions` | `payouts` and `credits` in PostgreSQL; `ledger.payouts` | exactly once |
@@ -409,6 +409,19 @@ a derived topic is empty until the job before it has committed its first
 rows; ninety seconds is several times longer than that takes here, and a
 shorter setting cost one quote its multiplier in an earlier run.
 
+Idleness is detected per scan, on each one's own clock, and the end of the
+night showed what that means for a statement set. The price table was first
+kept by a second statement of the pricing job that computed the windows
+again from the same two sources. Recorded with the flight recorder, the two
+statements' unions saw the order stream and the riders' reports go quiet in
+the same two seconds but in a different order: one took the order stream's
+last watermark, 190, when the riders went quiet first, and closed six
+windows more; the other, with the order stream quiet first, kept the
+riders' 158 and closed none. Both are what idleness means, and which comes
+first is a race between four probes. The table is now kept from the
+published rows, the latest window per zone, so it is a function of the
+topic and ends where the topic ends.
+
 ## What it costs
 
 `tools/footprint.py` samples clink's processes from their own `/metrics` and
@@ -548,12 +561,7 @@ surge.
 
 ## Status
 
-Round 1: the core pipeline, on one machine (one open item: once the
-riders' reports go idle at the end of the night, the pricing job's second
-statement, which keeps the price table, closes six windows more than its
-first, which publishes the topic, though both read one shared reader; the
-check holds the table to the topic and reports it, and the recorder is
-next pointed at that job). Round 2: the systems around
+Round 1: the core pipeline, on one machine. Round 2: the systems around
 it, the legacy menu system (MySQL change data capture), the tablets' bus
 (Pulsar), the desk, the partners and the floor (RabbitMQ, Pulsar, NATS) and
 the tracker (Redis, Cassandra). Round 3: the match feed (HTTP polling),

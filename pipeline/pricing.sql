@@ -6,10 +6,15 @@
 -- minute, in event time. The multiplier is a step function of their ratio:
 -- 1.00x below one order per rider, 1.20x from one, 1.50x from two, 1.80x from
 -- three, and 2.00x when no rider is in the zone at all. Each window's row is
--- published exactly once (pipeline/quotes.sql prices orders from it) and kept
--- as the zone's current price in PostgreSQL, one row per zone, replaced in
--- place: an upsert is idempotent, so that table declares at least once and
--- the set is still accepted.
+-- published exactly once (pipeline/quotes.sql prices orders from it), and the
+-- second statement reads the published rows back and keeps each zone's
+-- latest window as its current price in PostgreSQL, one row per zone,
+-- replaced in place: an upsert is idempotent, so that table declares at
+-- least once and the set is still accepted. The table is kept from the
+-- topic rather than computed again from the two sources, so it is a
+-- function of what was published: computed twice, the two statements
+-- detected the sources going quiet at the end of the night on their own
+-- clocks, in either order, and could close a different last window each.
 
 CREATE TABLE order_changes (
     order_id      VARCHAR,
@@ -78,6 +83,23 @@ CREATE TABLE multipliers (
     transactional_id   = 'pricing-multipliers'
 );
 
+CREATE TABLE published (
+    cell           VARCHAR,
+    zone           VARCHAR,
+    demand         BIGINT,
+    supply         BIGINT,
+    multiplier_pct BIGINT,
+    window_start   BIGINT,
+    window_end     BIGINT
+) WITH (
+    connector         = 'kafka',
+    format            = 'json',
+    brokers           = 'kafka:9092',
+    topic             = 'pricing.multipliers',
+    group_id          = 'pricing-table',
+    auto_offset_reset = 'earliest'
+);
+
 CREATE TABLE zone_pricing (
     zone           VARCHAR PRIMARY KEY,
     cell           VARCHAR,
@@ -115,22 +137,10 @@ FROM activity
 GROUP BY cell, zone, HOP(ts, INTERVAL '5' MINUTE, INTERVAL '1' MINUTE);
 
 INSERT INTO zone_pricing
-WITH activity AS (
-  SELECT cell, zone, updated_at AS ts, CAST(1 AS BIGINT) AS is_order, CAST(NULL AS BIGINT) AS rider_id
-  FROM order_changes WHERE op = 'insert'
-  UNION ALL
-  SELECT cell, zone, ts, CAST(0 AS BIGINT) AS is_order, rider_id
-  FROM rider_positions
-)
-SELECT zone, cell,
-       CASE WHEN COUNT(DISTINCT rider_id) = 0 THEN 200
-            WHEN SUM(is_order) * 100 / COUNT(DISTINCT rider_id) >= 300 THEN 180
-            WHEN SUM(is_order) * 100 / COUNT(DISTINCT rider_id) >= 200 THEN 150
-            WHEN SUM(is_order) * 100 / COUNT(DISTINCT rider_id) >= 100 THEN 120
-            ELSE 100 END AS multiplier_pct,
-       SUM(is_order) AS demand,
-       COUNT(DISTINCT rider_id) AS supply,
-       window_end AS window_end_ms
-FROM activity
-GROUP BY cell, zone, HOP(ts, INTERVAL '5' MINUTE, INTERVAL '1' MINUTE);
+SELECT zone, cell, multiplier_pct, demand, supply, window_end AS window_end_ms
+FROM (
+    SELECT *, ROW_NUMBER() OVER (PARTITION BY zone ORDER BY window_end DESC) AS rn
+    FROM published
+) latest
+WHERE rn = 1;
 END;
