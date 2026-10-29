@@ -297,7 +297,9 @@ starts it again, resends a batch of reports and a batch of tablet events,
 runs the backfill, and checks every store. `SCENES=0` leaves out the
 standby Coordinator, the savepoint and the failover; otherwise they are part
 of every run. `SPEED=10` plays it slower; `CLEANUP=1` removes everything at
-the end. `DISPATCH_PARALLELISM=3` runs the dispatcher as three subtasks;
+the end. `CAPTURE_JOBS=kitchen` records the kitchen job with clink's flight
+recorder, for replaying offline afterwards (see "Dissecting it"); any of
+the jobs can be named. `DISPATCH_PARALLELISM=3` runs the dispatcher as three subtasks;
 every job otherwise runs as one. That needs a clink built after the fix to
 how a keyed row's state is filed for a restore, which the first run at
 parallelism three found. The stack otherwise stays up: Neo4j Browser is at
@@ -447,6 +449,16 @@ there before the round was called done:
   sat outside checkpointing, while its code checkpoints the cursor and
   re-polls from it; the record barred a job over the feed from declaring
   any guarantee.
+- `MATCH_RECOGNIZE` partitioned by the routing token the keyer stamps on a
+  row, one of 128, rather than by the partition key, so two restaurants
+  whose keys share a key group were one sequence of events to the pattern:
+  a quiet kitchen's accepted orders ended three of a busy one's runs of
+  bounces, the same three in every run. The restarts those alerts had been
+  put down to had nothing to do with it; the flight recorder showed both
+  restaurants' rows under one key at the operator's door.
+- A job submitted to a Coordinator could not arm the flight recorder: the
+  flag reached the embedded path only, and a takeover rebuilt a job without
+  it. Both now carry it, which is what made the trace above possible.
 
 Still open, and noted here rather than hidden: SQL jobs declare no rescale
 bounds, so a running SQL job cannot be rescaled live; the Pulsar source
@@ -459,7 +471,10 @@ are not reachable from SQL.
 ## Dissecting it
 
 Everything the run does is in plain files, and clink shows its working.
-With the stack up after a run (`run.sh` leaves it up):
+The systems stay up after a run; the clink processes stop when `run.sh`
+ends, so the Coordinator's API is read while the night plays (about six
+minutes, with the time between the scenes to spare), and the files
+afterwards:
 
 - A job's plan, without running it:
   `clink run pipeline/dispatch.sql --explain` prints the logical plan the
@@ -468,8 +483,9 @@ With the stack up after a run (`run.sh` leaves it up):
   `curl -s localhost:8081/api/v1/jobs/4 | python3 -m json.tool` shows
   `delivery_guarantee`, what limits it and the reasoning
   (`guarantee_reasons`); try the kitchen job, held to at least once, beside
-  the dispatcher, exactly once. Job ids follow the submission order in
-  `run.sh`. After the failover the Coordinator is on port 8084.
+  the dispatcher, exactly once. `state/run/jobs.tsv` lists each job's id,
+  which follows the submission order in `run.sh`. After the failover the
+  Coordinator is on port 8084.
 - What each operator received, emitted and dropped:
   `curl -s localhost:8081/api/v1/jobs/4/operators`. `run.sh` keeps the
   kitchen job's counters from before the failover and from the end under
@@ -477,8 +493,24 @@ With the stack up after a run (`run.sh` leaves it up):
 - The state inside a checkpoint: `clink state-cat
   --file state/run/checkpoints/_state/10/v1/1/checkpoint-<n>.snap` dumps the
   kitchen job's `distinct` set (one entry per tablet event) and the pattern
-  operator's held rows (`__cep_held__`), keyed by the restaurant's key
-  group; `clink state-diff` compares two checkpoints.
+  operator's held rows (`__cep_held__`), one entry per restaurant, under
+  the restaurant's id; `clink state-diff` compares two checkpoints.
+- The flight recorder: `CAPTURE_JOBS=kitchen ./run.sh` records what every
+  operator of the kitchen job was handed, per checkpoint epoch, under
+  `state/run/capture/kitchen/op-<id>/subtask-<n>/epoch-<checkpoint>.cap`
+  (each operator's `op.json` says which it is), and copies the job's
+  snapshots to `state-before-failover` just before the Coordinator is
+  killed, since the checkpoint directory keeps only the newest. `clink
+  capture-cat --dir state/run/capture/kitchen` lists the epochs, `--file`
+  prints one, rows and watermarks in the order the operator saw them, and
+  `clink replay --capture-dir state/run/capture/kitchen --checkpoint-dir
+  state/run/capture/kitchen/state-before-failover/v1 --op <id> --epoch <n>
+  --state-from <m> --verify`, with `m` the checkpoint the standby's log says
+  the job resumed from and `n` the first epoch the recorder wrote after it,
+  rebuilds the pattern operator from the restore point, feeds it that epoch
+  and prints what it emits, twice, to show the two runs identical. That is
+  how the kitchen defect below was found: the operator's own input, read
+  back, showed two restaurants' rows under one key.
 - The model the checks compare against: `python3 tools/reference.py`
   prints its counts, and `tools/reference.py` mirrors each job's rules in
   plain Python, one function per job, so a check line can be traced to the
@@ -516,12 +548,13 @@ surge.
 
 ## Status
 
-Round 1: the core pipeline, on one machine. Round 2: the systems around
-it (one open item: after the Coordinator failover the kitchen watch raises
-three of forty-one alerts differently from the model, with every row
-accounted for at the pattern operator's door, so the difference is in its
-state across that restore and is being traced in clink; the check reports
-it rather than hiding it), the legacy menu system (MySQL change data capture), the tablets' bus
+Round 1: the core pipeline, on one machine (one open item: once the
+riders' reports go idle at the end of the night, the pricing job's second
+statement, which keeps the price table, closes six windows more than its
+first, which publishes the topic, though both read one shared reader; the
+check holds the table to the topic and reports it, and the recorder is
+next pointed at that job). Round 2: the systems around
+it, the legacy menu system (MySQL change data capture), the tablets' bus
 (Pulsar), the desk, the partners and the floor (RabbitMQ, Pulsar, NATS) and
 the tracker (Redis, Cassandra). Round 3: the match feed (HTTP polling),
 search (OpenSearch), telemetry (InfluxDB), the lakehouse (Delta), the gauges

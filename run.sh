@@ -7,6 +7,7 @@
 #   DISPATCH_PARALLELISM=3 ./run.sh            the dispatcher three ways (see README)
 #   SCENES=0 ./run.sh                          the night without the operational scenes
 #   CLINK_SRC=<clink checkout> ./run.sh        where scripts/formal-check.sh is (default ../clink)
+#   CAPTURE_JOBS="kitchen" ./run.sh            record these jobs with clink's flight recorder (see README)
 #   CLEANUP=1 ... ./run.sh                     and remove everything at the end
 #
 # Steps: generate the night (tools/world.py); start every system from empty
@@ -59,6 +60,12 @@ CLINK_STANDBY_HTTP_PORT="${CLINK_STANDBY_HTTP_PORT:-8084}"
 SPEED="${SPEED:-30}"
 DISPATCH_PARALLELISM="${DISPATCH_PARALLELISM:-1}"
 SCENES="${SCENES:-1}"
+# The jobs to record with clink's flight recorder, by name: each of their
+# operators writes the input it was handed, per checkpoint epoch, under
+# state/run/capture/<job>, which `clink capture-cat` inspects and `clink
+# replay` reproduces offline, from the checkpoint before the epoch (see the
+# README, "Dissecting it").
+CAPTURE_JOBS="${CAPTURE_JOBS:-}"
 CLINK_SRC="${CLINK_SRC:-${ROOT}/../clink}"
 export KAFKA_HOST_PORT POSTGRES_HOST_PORT NEO4J_HTTP_PORT CLICKHOUSE_HOST_PORT
 export MYSQL_HOST_PORT RABBITMQ_HOST_PORT RABBITMQ_HTTP_PORT NATS_HOST_PORT REDIS_HOST_PORT
@@ -218,15 +225,24 @@ for f in pipeline/*.sql; do
       -e "s#http://match-feed:28090#http://localhost:${MATCH_FEED_PORT}#g" \
       "${f}" >"${STATE}/${job}.sql"
 done
+captured() {  # <job>: whether CAPTURE_JOBS names it
+  case " ${CAPTURE_JOBS} " in *" $1 "*) return 0 ;; esac
+  return 1
+}
+# Each job's id, as the Coordinator assigned it: state/run/jobs.tsv.
+: >"${STATE}/jobs.tsv"
 for job in orders pricing quotes dispatch ledgers analytics archive menus bridge kitchen ops tracker \
            search match lake telemetry gauges; do
   p=1; [ "${job}" = dispatch ] && p="${DISPATCH_PARALLELISM}"
+  capture=""; captured "${job}" && capture="--capture-dir=${STATE}/capture/${job}"
   submitted="$("${BIN}/clink" run "${STATE}/${job}.sql" --coordinator-host=127.0.0.1 \
     --coordinator-port="${CLINK_HTTP_PORT}" --name="${job}" --parallelism="${p}" \
-    --checkpoint-dir="${STATE}/checkpoints" --checkpoint-interval-ms=2000)"
+    --checkpoint-dir="${STATE}/checkpoints" --checkpoint-interval-ms=2000 ${capture:+"${capture}"})"
   echo "${submitted}"
-  [ "${job}" = gauges ] && gauges_job="$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["job_id"])' "${submitted}")"
-  [ "${job}" = kitchen ] && kitchen_job="$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["job_id"])' "${submitted}")"
+  id="$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["job_id"])' "${submitted}")"
+  printf '%s\t%s\n' "${job}" "${id}" >>"${STATE}/jobs.tsv"
+  [ "${job}" = gauges ] && gauges_job="${id}"
+  [ "${job}" = kitchen ] && kitchen_job="${id}"
 done
 # The kitchen job's per-operator counters, for the record: what each operator
 # received, emitted and dropped, taken before the failover and at the end.
@@ -285,9 +301,10 @@ if [ "${SCENES}" = 1 ]; then
   echo "match minute ${m}: ${stopped}"
   savepoint="$(printf '%s' "${stopped}" | sed -nE 's/.*savepoint_checkpoint_id=([0-9]+).*/\1/p')"
   backend="$(curl -fsS "http://127.0.0.1:$(coord_http)/api/v1/jobs/${gauges_job}" | python3 -c 'import json, sys; print(json.load(sys.stdin).get("state_backend_uri", ""))')"
+  capture=""; captured gauges && capture="${STATE}/capture/gauges"
   "${BIN}/clink_submit_sql" --file "${STATE}/gauges.sql" --coordinator-host 127.0.0.1 --coordinator-port "$(coord_http)" \
     --name gauges-resumed --checkpoint-dir "${STATE}/checkpoints" --checkpoint-interval-ms 2000 \
-    ${backend:+--state-backend "${backend}"} \
+    ${backend:+--state-backend "${backend}"} ${capture:+--capture-dir "${capture}"} \
     --restore-from-dir "${STATE}/checkpoints/_jobs/${gauges_job}" --restore-from-checkpoint-id "${savepoint}"
   echo "the gauges job resumed from savepoint ${savepoint}"
   # Minute 95: the leading Coordinator is killed; the standby takes the leader
@@ -299,6 +316,15 @@ if [ "${SCENES}" = 1 ]; then
   done
   echo "match minute ${m}: killing the leading Coordinator"
   operators_of "${kitchen_job}" "${STATE}/kitchen-operators-before-failover.json"
+  # A recorded job's newest snapshots, copied before the kill: the takeover
+  # restores from the newest completed checkpoint, which the checkpoint
+  # directory keeps only until a newer one completes, and a replay of the
+  # epochs after the restore starts from that state.
+  for job in ${CAPTURE_JOBS}; do
+    id="$(awk -F '\t' -v n="${job}" '$1 == n { print $2 }' "${STATE}/jobs.tsv")"
+    [ -n "${id}" ] && [ -d "${STATE}/checkpoints/_state/${id}" ] \
+      && cp -R "${STATE}/checkpoints/_state/${id}" "${STATE}/capture/${job}/state-before-failover"
+  done
   kill -9 "${coord_pid}"
   wait "${coord_pid}" 2>/dev/null || true
   await_http "http://127.0.0.1:${CLINK_STANDBY_HTTP_PORT}/api/v1/health" "the standby Coordinator"
@@ -317,7 +343,9 @@ say "Reading the dispatch archive back into the analytics store"
 # The dispatcher's tail: the orders still in their window when the quotes
 # stopped are decided once the idle timeout releases them, and the archive
 # commits them at its next checkpoint. The backfill reads what the archive
-# holds when it starts, so it waits for the topic to stop growing first.
+# holds when it starts, so it waits for the topic to stop growing first, and
+# then for the archive's committed files to stop changing, which they do once
+# the checkpoint that commits the last decisions completes.
 last=-1
 for _ in $(seq 1 12); do
   n="$(docker compose exec -T kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server kafka:9092 \
@@ -326,7 +354,13 @@ for _ in $(seq 1 12); do
   last="${n}"
   sleep 20
 done
-sleep 5
+last=""
+for _ in $(seq 1 24); do
+  n="$(ls -l "${ROOT}/state/archive/dispatch.decisions/committed" 2>/dev/null | awk '{print $5, $9}' | cksum)"
+  [ "${n}" = "${last}" ] && break
+  last="${n}"
+  sleep 5
+done
 "${BIN}/clink" run "${STATE}/backfill.sql" --coordinator-host=127.0.0.1 \
   --coordinator-port="$(coord_http)" --name=backfill --parallelism=1 \
   --checkpoint-dir="${STATE}/checkpoints" --checkpoint-interval-ms=2000
