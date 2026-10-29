@@ -57,6 +57,8 @@ class Clock(pacing.Clock):
 def main():
     global CLOCK
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--bind", default="127.0.0.1",
+                    help="the address to listen on: the loopback on one machine, the ops host's private address on a rig")
     ap.add_argument("--port", type=int, default=28090)
     ap.add_argument("--speed", type=float, default=30.0)
     ap.add_argument("--start-at", type=float, default=None, help="wall time of the first record")
@@ -64,8 +66,8 @@ def main():
     m = pacing.manifest()
     EVENTS.extend(pacing.records("match.jsonl"))
     CLOCK = Clock(args.start_at or time.time(), m["first_ms"], args.speed)
-    server = ThreadingHTTPServer(("0.0.0.0", args.port), Handler)
-    print(f"match_feed: {len(EVENTS)} events on port {args.port}", flush=True)
+    server = ThreadingHTTPServer((args.bind, args.port), Handler)
+    print(f"match_feed: {len(EVENTS)} events on {args.bind}:{args.port}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

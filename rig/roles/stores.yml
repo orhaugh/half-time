@@ -47,7 +47,7 @@ services:
     volumes:
       - /ht/state/archive:/var/lib/clickhouse/user_files/archive
     healthcheck:
-      test: ["CMD-SHELL", "clickhouse-client --user halftime --password halftime --query 'SELECT 1' >/dev/null 2>&1"]
+      test: ["CMD-SHELL", "clickhouse-client --query 'SELECT 1' >/dev/null 2>&1"]
       interval: 2s
       timeout: 5s
       retries: 60

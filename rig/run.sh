@@ -106,7 +106,7 @@ on_host "${OPS_PUB}" "mkdir -p /ht/half-time/rig/generated && printf '%s\n' 'glo
 say "The night, generated on the ops host, and the schemas and first rows"
 OPS_CMD "python3 -I tools/world.py --out state/world --cells ${CELLS} --riders-per-cell ${RIDERS_PER_CELL} --restaurants-per-cell ${RESTAURANTS_PER_CELL} --customers-per-cell ${CUSTOMERS_PER_CELL} --orders-per-minute ${ORDERS_PER_MINUTE}"
 OPS_CMD "docker run --rm -i --network host -e PGPASSWORD=halftime postgres:16.15 psql -q -v ON_ERROR_STOP=1 -h ${STORES} -U halftime -d halftime -f - < postgres/schema.sql"
-OPS_CMD "docker run --rm -i --network host clickhouse/clickhouse-server:25.3 clickhouse-client --host ${STORES} --user halftime --password halftime --multiquery < clickhouse/schema.sql"
+OPS_CMD "docker run --rm -i --network host -e CLICKHOUSE_USER=halftime -e CLICKHOUSE_PASSWORD=halftime clickhouse/clickhouse-server:25.3 clickhouse-client --host ${STORES} --multiquery < clickhouse/schema.sql"
 OPS_CMD "docker run --rm -i --network host -e MYSQL_PWD=halftime mysql:8.0 mysql -h ${STORES} -u root halftime < mysql/schema.sql"
 OPS_CMD "docker run --rm -i --network host cassandra:4 cqlsh ${MSG} 9042 < cassandra/schema.cql"
 OPS_CMD "python3 -I tools/feed_menus.py --initial && python3 -I tools/init_messaging.py && python3 -I tools/load_graph.py --reset"
@@ -125,7 +125,7 @@ OPS_CMD "for _ in \$(seq 1 60); do [ \"\$(curl -fsS http://${COORD1}:8081/api/v1
 say "The jobs: the same SQL, the rig's addresses"
 OPS_CMD "mkdir -p state/rig-sql && for f in pipeline/*.sql; do sed -e 's#kafka:9092#${KAFKA}:9092#g' -e 's#http://neo4j:7474#http://${STORES}:7474#g' -e 's#host=postgres port=5432#host=${STORES} port=5432#g' -e \"s#host *= *'clickhouse'#host = '${STORES}'#g\" -e \"s#host *= *'mysql'#host = '${STORES}'#g\" -e 's#pulsar://pulsar:6650#pulsar://${MSG}:6650#g' -e \"s#host *= *'rabbitmq'#host = '${MSG}'#g\" -e 's#nats://nats:4222#nats://${MSG}:4222#g' -e \"s#host *= *'redis'#host = '${MSG}'#g\" -e \"s#contact_points *= *'cassandra'#contact_points = '${MSG}'#g\" -e 's#http://opensearch:9200#http://${SEARCH}:9200#g' -e 's#http://influxdb:8086#http://${SEARCH}:8086#g' -e 's#http://pushgateway:9091#http://${OPS}:9091#g' -e 's#http://match-feed:28090#http://${OPS}:28090#g' -e \"s#'/archive/#'/ht/state/archive/#g\" \"\$f\" > state/rig-sql/\$(basename \"\$f\"); done"
 # The match feed first: the match job polls it from its first second.
-OPS_CMD "mkdir -p state/run && start_at=\$(python3 -c 'import time; print(time.time() + 120)') && echo \$start_at > state/run/start_at && nohup python3 -I tools/match_feed.py --port 28090 --speed ${SPEED} --start-at \$start_at > state/run/match_feed.log 2>&1 &"
+OPS_CMD "mkdir -p state/run && start_at=\$(python3 -c 'import time; print(time.time() + 120)') && echo \$start_at > state/run/start_at && nohup python3 -I tools/match_feed.py --bind ${OPS} --port 28090 --speed ${SPEED} --start-at \$start_at > state/run/match_feed.log 2>&1 &"
 for job in orders pricing quotes dispatch ledgers analytics archive menus bridge kitchen ops tracker search match lake telemetry gauges; do
   p="${PARALLELISM}"
   case "${job}" in orders|menus|match|bridge|kitchen|gauges) p=1 ;; esac

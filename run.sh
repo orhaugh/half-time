@@ -152,8 +152,7 @@ docker compose run --rm --no-deps -T kafka-init
 docker compose run --rm --no-deps -T nats-init
 docker compose exec -T postgres psql -q -v ON_ERROR_STOP=1 -U halftime -d halftime -f - <postgres/schema.sql
 echo "order store: postgres/schema.sql applied"
-docker compose exec -T clickhouse clickhouse-client --user halftime --password halftime \
-  --multiquery <clickhouse/schema.sql
+docker compose exec -T clickhouse clickhouse-client --multiquery <clickhouse/schema.sql
 echo "analytics store: clickhouse/schema.sql applied"
 docker compose exec -T -e MYSQL_PWD=halftime mysql mysql -u root halftime <mysql/schema.sql
 echo "menu store: mysql/schema.sql applied"
@@ -203,26 +202,28 @@ start_worker 2
 pids+=("${last_pid}")
 for f in pipeline/*.sql; do
   job="$(basename "${f}" .sql)"
-  # The same SQL, reaching the services through their host ports.
-  sed -e "s#kafka:9092#localhost:${KAFKA_HOST_PORT}#g" \
-      -e "s#http://neo4j:7474#http://localhost:${NEO4J_HTTP_PORT}#g" \
-      -e "s#host=postgres port=5432#host=localhost port=${POSTGRES_HOST_PORT}#g" \
-      -e "s#host *= *'clickhouse'#host = 'localhost'#g" \
+  # The same SQL, reaching the services through their host ports, which listen
+  # on the IPv4 loopback only (see docker-compose.yml): hence 127.0.0.1, never
+  # localhost, which a client may try as ::1 first.
+  sed -e "s#kafka:9092#127.0.0.1:${KAFKA_HOST_PORT}#g" \
+      -e "s#http://neo4j:7474#http://127.0.0.1:${NEO4J_HTTP_PORT}#g" \
+      -e "s#host=postgres port=5432#host=127.0.0.1 port=${POSTGRES_HOST_PORT}#g" \
+      -e "s#host *= *'clickhouse'#host = '127.0.0.1'#g" \
       -e "s#port *= *'9000'#port = '${CLICKHOUSE_HOST_PORT}'#g" \
       -e "s#'/archive/#'${ROOT}/state/archive/#g" \
       -e "s#host *= *'mysql'#host = '127.0.0.1'#g" \
       -e "s#port *= *'3306'#port = '${MYSQL_HOST_PORT}'#g" \
-      -e "s#pulsar://pulsar:6650#pulsar://localhost:6650#g" \
-      -e "s#host *= *'rabbitmq'#host = 'localhost'#g" \
+      -e "s#pulsar://pulsar:6650#pulsar://127.0.0.1:6650#g" \
+      -e "s#host *= *'rabbitmq'#host = '127.0.0.1'#g" \
       -e "s#port *= *'5672'#port = '${RABBITMQ_HOST_PORT}'#g" \
-      -e "s#nats://nats:4222#nats://localhost:${NATS_HOST_PORT}#g" \
-      -e "s#host *= *'redis'#host = 'localhost'#g" \
+      -e "s#nats://nats:4222#nats://127.0.0.1:${NATS_HOST_PORT}#g" \
+      -e "s#host *= *'redis'#host = '127.0.0.1'#g" \
       -e "s#port *= *'6379'#port = '${REDIS_HOST_PORT}'#g" \
-      -e "s#contact_points *= *'cassandra'#contact_points = 'localhost'#g" \
-      -e "s#http://opensearch:9200#http://localhost:${OPENSEARCH_HOST_PORT}#g" \
-      -e "s#http://influxdb:8086#http://localhost:${INFLUXDB_HOST_PORT}#g" \
-      -e "s#http://pushgateway:9091#http://localhost:${PUSHGATEWAY_HOST_PORT}#g" \
-      -e "s#http://match-feed:28090#http://localhost:${MATCH_FEED_PORT}#g" \
+      -e "s#contact_points *= *'cassandra'#contact_points = '127.0.0.1'#g" \
+      -e "s#http://opensearch:9200#http://127.0.0.1:${OPENSEARCH_HOST_PORT}#g" \
+      -e "s#http://influxdb:8086#http://127.0.0.1:${INFLUXDB_HOST_PORT}#g" \
+      -e "s#http://pushgateway:9091#http://127.0.0.1:${PUSHGATEWAY_HOST_PORT}#g" \
+      -e "s#http://match-feed:28090#http://127.0.0.1:${MATCH_FEED_PORT}#g" \
       "${f}" >"${STATE}/${job}.sql"
 done
 captured() {  # <job>: whether CAPTURE_JOBS names it
@@ -256,7 +257,6 @@ for _ in $(seq 1 60); do
 done
 echo "order stream: replication slot halftime_orders is active"
 # The menu stream has announced its snapshot before the first change is made.
-# (The MySQL client takes 'localhost' for a socket, hence 127.0.0.1 above.)
 items="$(python3 -c 'import json; print(json.load(open("state/world/manifest.json"))["menu_items"])')"
 deadline=$(( $(date +%s) + 120 ))
 while :; do

@@ -307,7 +307,9 @@ http://localhost:7474, RabbitMQ's management UI at http://localhost:15672,
 Grafana at http://localhost:23000 (admin / halftime, with the half-time
 dashboard provisioned from `deploy/grafana`), Prometheus at
 http://localhost:29090, the Coordinator at http://localhost:8081, and
-ClickHouse answers on port 29000.
+ClickHouse answers on port 29000. Every one of them listens on this
+machine's loopback address only: the systems take demo passwords, set in
+`docker-compose.yml`, and several none at all, so none is for a network.
 
 ## Running it on a rig
 

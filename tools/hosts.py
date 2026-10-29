@@ -49,11 +49,11 @@ def clickhouse_client(*args):
     """The argv of clickhouse-client against the analytics store."""
     if MODE == "rig":
         host, _, port = os.environ.get("HT_CLICKHOUSE", "clickhouse:9000").rpartition(":")
-        return ["docker", "run", "--rm", "-i", "--network", "host", CLICKHOUSE_IMAGE,
-                "clickhouse-client", "--host", host, "--port", port,
-                "--user", "halftime", "--password", "halftime", *args]
-    return ["docker", "compose", "exec", "-T", "clickhouse", "clickhouse-client",
-            "--user", "halftime", "--password", "halftime", *args]
+        return ["docker", "run", "--rm", "-i", "--network", "host",
+                "-e", "CLICKHOUSE_USER=halftime", "-e", "CLICKHOUSE_PASSWORD=halftime", CLICKHOUSE_IMAGE,
+                "clickhouse-client", "--host", host, "--port", port, *args]
+    # The container's environment carries the user and the password.
+    return ["docker", "compose", "exec", "-T", "clickhouse", "clickhouse-client", *args]
 
 
 def neo4j_url():
