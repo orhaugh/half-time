@@ -8,11 +8,12 @@
 -- it. Per restaurant, in event-time order, three consecutive bounces (a
 -- declined order with no acceptance between) raise one alert naming the
 -- three orders and the span, and rows are held until the watermark passes
--- them, which is forty-five minutes of match behind the newest row (see
--- the table). The alert is published at least once: Pulsar hands clink no position
--- to replay from, only redelivery of what was not acknowledged, so the
--- planner holds a job over it to at least once, and a repeated alert names
--- the same restaurant and the same span.
+-- them, a minute of match behind the newest row. The bus is read through an
+-- exclusive subscription: the source records its position at each
+-- checkpoint, and a restart seeks back to it and replays the bus in order
+-- (see the table). The alert is published at least once: clink refuses an
+-- exactly-once sink in a job over a Pulsar source, and a repeated alert
+-- names the same restaurant and the same span.
 
 CREATE TABLE tablet_bus (
     event_id      VARCHAR,
@@ -27,13 +28,15 @@ CREATE TABLE tablet_bus (
     service_url       = 'pulsar://pulsar:6650',
     topic             = 'persistent://public/default/kitchen.events',
     subscription      = 'kitchen',
+    -- Exclusive, so a restart replays in order from the checkpoint and a
+    -- minute of lateness is enough, as on the Kafka tables. Through the
+    -- default shared subscription the broker hands a restarted consumer the
+    -- messages its predecessor had not acknowledged after the newer ones,
+    -- and at thirty times real time a restart's seconds are minutes of
+    -- match: the watch needed forty-five of them to take those back in.
+    subscription_type = 'exclusive',
     event_time_column = 'ts',
-    -- Forty-five minutes of lateness, not one: after a restart the bus hands
-    -- a consumer the messages its predecessor had not acknowledged after the
-    -- newer ones, and at thirty times real time a restart's seconds are
-    -- minutes of match. A bus clink replays from a position of its own
-    -- needs a minute here, as the Kafka tables have.
-    watermark_lag_ms  = '2700000',
+    watermark_lag_ms  = '60000',
     idle_timeout_ms   = '90000'
 );
 

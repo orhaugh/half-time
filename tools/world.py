@@ -90,7 +90,7 @@ BOUNCE_SHARE = 0.5                  # the chance a busy kitchen does, in a busy 
 BOUNCE_FROM = 1.5                   # a kitchen is overloaded from this phase multiplier
 ALERT_RUN = 3                       # consecutive bounces that raise an alert
 GOAL_SURGE_MS = 2 * MIN             # the orders placed this long after a goal are its surge
-KITCHEN_LAG_MS = 45 * MIN           # the tablet bus's lateness allowance (pipeline/kitchen.sql)
+KITCHEN_LAG_MS = 1 * MIN            # the tablet bus's lateness allowance (pipeline/kitchen.sql)
 DISHES = ["margherita", "pad thai", "bibimbap", "shawarma", "ramen", "pho", "jollof rice",
           "nyama choma", "bacalhau", "francesinha", "okonomiyaki", "takoyaki", "biryani",
           "falafel wrap", "poke bowl", "lamb tagine", "pierogi", "arepas", "ceviche",

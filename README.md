@@ -59,18 +59,20 @@ model that never touched clink.
   read through a replication slot; the menu system is MySQL, read from its
   binary log, the existing rows first as a snapshot at a consistent position.
   Each is announced on Kafka exactly once, and neither system knows.
-- **A pattern over a bus that repeats itself.** The tablets' events arrive on
-  Pulsar, which delivers at least once. The kitchen job makes them distinct
-  before `MATCH_RECOGNIZE` looks for three bounces in a row per restaurant,
-  in event time, so a repeated event, from a restart or a retry, cannot count
-  as a bounce of its own. The alert itself goes out at least once: Pulsar
-  hands clink no position to replay from, only redelivery of what was not
-  acknowledged, and clink's planner holds a job over such a source to what
-  that supports, however the sink is declared. The same redelivery arrives
-  after the newer messages when a consumer restarts, so the watch allows the
-  bus forty-five minutes of match-time lateness, which at thirty times real
-  time is the ninety seconds a restart and a redelivery take; a source clink
-  replays from a position of its own needs a minute.
+- **A pattern over a bus that repeats itself.** The tablets' events arrive
+  on Pulsar, which delivers at least once. The kitchen job makes them
+  distinct before `MATCH_RECOGNIZE` looks for three bounces in a row per
+  restaurant, in event time, so a repeated event, from a restart or a retry,
+  cannot count as a bounce of its own. The alert itself goes out at least
+  once: clink refuses an exactly-once sink in a job over a Pulsar source, so
+  the alerts topic is declared at least once. The bus is read through an
+  exclusive subscription, so the source records its position at each
+  checkpoint, a restart seeks back to it and replays the bus in order, and
+  the watch allows the same minute of lateness as the Kafka tables. Through
+  the default shared subscription the broker hands a restarted consumer its
+  unacknowledged messages after the newer ones, and the watch needed
+  forty-five minutes of match time, the ninety seconds a restart and a
+  redelivery take at thirty times real time, to take them back in.
 - **Stores kept by key.** The tracker ranks each order's changes by version
   and keeps the top one in Redis, so a change that arrives behind a later one
   cannot win, and the key is replaced or restored as the ranking changes.
@@ -474,14 +476,17 @@ there before the round was called done:
 - A job submitted to a Coordinator could not arm the flight recorder: the
   flag reached the embedded path only, and a takeover rebuilt a job without
   it. Both now carry it, which is what made the trace above possible.
+- The Pulsar source could replay a restart only by broker redelivery,
+  which hands a restarted consumer its unacknowledged messages after newer
+  ones. It now takes an exclusive subscription that records its position
+  at each checkpoint and seeks back to it, which is what lets the kitchen
+  watch run with a minute of lateness.
 
 Still open, and noted here rather than hidden: SQL jobs declare no rescale
-bounds, so a running SQL job cannot be rescaled live; the Pulsar source
-hands a restarted consumer its unacknowledged messages after the newer
-ones, where a seek to the oldest of them would replay in order; the
-protocol trace's sink events carry no job id, so a run of many jobs cannot
-be validated against the specification job by job; and MQTT and MongoDB
-are not reachable from SQL.
+bounds, so a running SQL job cannot be rescaled live; the protocol trace's
+sink events carry no job id, so a run of many jobs cannot be validated
+against the specification job by job; and MQTT and MongoDB are not
+reachable from SQL.
 
 ## Dissecting it
 
