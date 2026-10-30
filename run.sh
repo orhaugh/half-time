@@ -27,10 +27,12 @@
 # standby Coordinator stands by from the start; at minute 75 the gauges job
 # is stopped at a savepoint and resubmitted from it; at minute 95 the leading
 # Coordinator is killed and the standby takes over, with every job recovered
-# from its checkpoints. Every clink process records its protocol trace under
+# from its checkpoints. Around them, the dispatcher's join is scaled to twice
+# its parallelism for the surge after the minute-67 goal, kept there through
+# the failover, and scaled back after the last goal. Every clink process records its protocol trace under
 # state/run/traces; TRACE_CHECK=1 hands it to the exactly-once
 # specification's validator after the stores are checked, one job at a time
-# (about ten minutes, and it needs Java and a clink checkout).
+# (ten to twenty-five minutes, and it needs Java and a clink checkout).
 set -euo pipefail
 cd "$(dirname "$0")"
 ROOT="$(pwd)"
@@ -79,12 +81,14 @@ say() { printf '\n==> %s\n' "$*"; }
 pids=()
 worker1_pid=""
 coord_pid=""
-cleanup() {
+# Every process the run started: clink's, the match feed and the footprint
+# sampler. A process that has not stopped ten seconds after it is asked to is
+# killed.
+stop_processes() {
   local pid
   for pid in ${pids[@]+"${pids[@]}"} ${worker1_pid}; do
     kill "${pid}" 2>/dev/null || true
   done
-  # A process that has not stopped after ten seconds is killed.
   for _ in $(seq 1 10); do
     alive=0
     for pid in ${pids[@]+"${pids[@]}"} ${worker1_pid}; do
@@ -96,6 +100,9 @@ cleanup() {
   for pid in ${pids[@]+"${pids[@]}"} ${worker1_pid}; do
     kill -9 "${pid}" 2>/dev/null || true
   done
+}
+cleanup() {
+  stop_processes
   wait 2>/dev/null || true
   if [ "${CLEANUP:-0}" = 1 ]; then
     docker compose down -v >/dev/null 2>&1 || true
@@ -236,15 +243,44 @@ for job in orders pricing quotes dispatch ledgers analytics archive menus bridge
            search match lake telemetry gauges; do
   p=1; [ "${job}" = dispatch ] && p="${DISPATCH_PARALLELISM}"
   capture=""; captured "${job}" && capture="--capture-dir=${STATE}/capture/${job}"
+  # The dispatcher declares its rescalable stages, up to twice its
+  # parallelism, and names them on stderr: the join is resized below.
+  rescalable=""; [ "${job}" = dispatch ] && [ "${SCENES}" = 1 ] && rescalable="--max-parallelism=$((2 * p))"
   submitted="$("${BIN}/clink" run "${STATE}/${job}.sql" --coordinator-host=127.0.0.1 \
     --coordinator-port="${CLINK_HTTP_PORT}" --name="${job}" --parallelism="${p}" \
-    --checkpoint-dir="${STATE}/checkpoints" --checkpoint-interval-ms=2000 ${capture:+"${capture}"})"
+    --checkpoint-dir="${STATE}/checkpoints" --checkpoint-interval-ms=2000 ${capture:+"${capture}"} \
+    ${rescalable:+"${rescalable}"} 2>"${STATE}/${job}.submit.err")" \
+    || { cat "${STATE}/${job}.submit.err" >&2; exit 1; }
   echo "${submitted}"
+  grep -h '^rescalable' "${STATE}/${job}.submit.err" || true
   id="$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["job_id"])' "${submitted}")"
   printf '%s\t%s\n' "${job}" "${id}" >>"${STATE}/jobs.tsv"
   [ "${job}" = gauges ] && gauges_job="${id}"
   [ "${job}" = kitchen ] && kitchen_job="${id}"
+  [ "${job}" = dispatch ] && dispatch_job="${id}"
 done
+# The dispatcher's join, as its submission named it among the rescalable stages.
+dispatch_join="$(sed -nE 's/^rescalable up to parallelism [0-9]+: //p' "${STATE}/dispatch.submit.err" \
+  | tr ',' '\n' | tr -d ' ' | grep '^ijoin_' | head -1 || true)"
+# The parallelism the dispatcher's graph records for an operator.
+graph_parallelism() {  # <job id> <operator id>
+  curl -fsS "http://127.0.0.1:$(coord_http)/api/v1/jobs/$1/graph" 2>/dev/null | python3 -c '
+import json, sys
+nodes = json.load(sys.stdin).get("nodes", [])
+print(next((n.get("parallelism", 1) for n in nodes if n.get("id") == sys.argv[1]), "?"))' "$2" \
+    || echo "?"
+}
+rescale_join() {  # <parallelism>
+  "${BIN}/clink" rescale-op --job-id="${dispatch_job}" --op="${dispatch_join}" --parallelism="$1" \
+    --coordinator-host=127.0.0.1 --coordinator-port="$(coord_ctl)"
+}
+await_minute() {  # <match minute>
+  for _ in $(seq 1 1200); do
+    m="$(cat "${STATE}/orders.progress" 2>/dev/null || echo -99)"
+    [ "${m}" -ge "$1" ] && return 0
+    sleep 0.5
+  done
+}
 # The kitchen job's per-operator counters, for the record: what each operator
 # received, emitted and dropped, taken before the failover and at the end.
 operators_of() {  # <job id> <file>
@@ -290,6 +326,12 @@ sleep 2
 start_worker 1
 worker1_pid="${last_pid}"
 if [ "${SCENES}" = 1 ]; then
+  # Minute 67, a goal: orders surge for two minutes, and the dispatcher's
+  # join, which pairs each order with the riders near it, is scaled to twice
+  # its parallelism while it runs. It restores its state from the last
+  # completed checkpoint at the new layout, and the job replays from there.
+  await_minute 67
+  echo "match minute ${m}: the dispatcher's join ${dispatch_join:-(none named)} to $((2 * DISPATCH_PARALLELISM)) subtasks: $(rescale_join $((2 * DISPATCH_PARALLELISM)) 2>&1)"
   # Minute 75: the gauges job is stopped at a savepoint, which commits its
   # tail, and resubmitted from that savepoint as a new job.
   for _ in $(seq 1 1200); do
@@ -329,6 +371,16 @@ if [ "${SCENES}" = 1 ]; then
   wait "${coord_pid}" 2>/dev/null || true
   await_http "http://127.0.0.1:${CLINK_STANDBY_HTTP_PORT}/api/v1/health" "the standby Coordinator"
   echo "the standby Coordinator leads (http://localhost:${CLINK_STANDBY_HTTP_PORT})"
+  # The takeover planned the graph that wrote the checkpoint it restored: the
+  # rescaled one, which the manifest recorded when the join was resized.
+  for _ in $(seq 1 60); do
+    [ "$(graph_parallelism "${dispatch_job}" "${dispatch_join}")" != "?" ] && break
+    sleep 1
+  done
+  echo "after the takeover the dispatcher's join runs as $(graph_parallelism "${dispatch_job}" "${dispatch_join}") subtasks"
+  # Minute 110, after the last goal's surge: back to its parallelism.
+  await_minute 110
+  echo "match minute ${m}: the dispatcher's join back to ${DISPATCH_PARALLELISM}: $(rescale_join "${DISPATCH_PARALLELISM}" 2>&1)"
 fi
 wait "${pings_pid}"
 wait "${orders_pid}"
@@ -373,9 +425,18 @@ python3 -I tools/check_run.py --wait 300 || rc=1
 python3 -I tools/check_round2.py --wait 120 || rc=1
 python3 -I tools/check_round3.py --wait 120 || rc=1
 if [ "${SCENES}" = 1 ]; then
+  check_trace=0
+  [ "${TRACE_CHECK:-0}" = 1 ] && [ -x "${CLINK_SRC}/scripts/formal-check.sh" ] && check_trace=1
+  # The trace is checked as the run left it. A running Coordinator or Worker
+  # keeps appending to the files the check reads, so a ten-minute check read
+  # a run ten minutes longer, job after job: one machine under pressure made
+  # it ninety, and a job's trace outgrew the longest behaviour the checker
+  # follows. Every process is stopped first, the footprint sampler with them,
+  # so what the run cost leaves the check out.
+  [ "${check_trace}" = 1 ] && stop_processes
   n="$(ls "${STATE}/traces" | wc -l | tr -d ' ')"
   lines="$(cat "${STATE}/traces"/*.ndjson | wc -l | tr -d ' ')"
-  if [ "${TRACE_CHECK:-0}" = 1 ] && [ -x "${CLINK_SRC}/scripts/formal-check.sh" ]; then
+  if [ "${check_trace}" = 1 ]; then
     say "Checking the run's protocol trace against the exactly-once specification"
     if TRACE_JOBS="${TRACE_JOBS:-4}" "${CLINK_SRC}/scripts/formal-check.sh" --trace "${STATE}/traces" \
         >"${STATE}/trace-check.log" 2>&1; then
@@ -387,9 +448,9 @@ if [ "${SCENES}" = 1 ]; then
       rc=1
     fi
   else
-    # Validating every job's run against the specification takes about ten
-    # minutes and a Java runtime, so it is asked for: TRACE_CHECK=1, with
-    # CLINK_SRC pointing at a clink checkout.
+    # Validating every job's run against the specification takes ten to
+    # twenty-five minutes and a Java runtime, so it is asked for:
+    # TRACE_CHECK=1, with CLINK_SRC pointing at a clink checkout.
     echo "protocol trace: ${lines} events in ${n} process files recorded under ${STATE}/traces (not checked: TRACE_CHECK=1 checks it)"
   fi
 fi

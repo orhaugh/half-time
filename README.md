@@ -93,27 +93,34 @@ model that never touched clink.
   tablet events. Every topic, queue, stream, key and table is then checked
   against what the night's data says it must hold.
 - **The operational scenes.** A standby Coordinator stands by from the
-  start. At minute 75 the gauges job is stopped at a savepoint, which commits
-  its tail, and resubmitted from that savepoint as a new job. At minute 95
-  the leading Coordinator is killed; the standby takes the leader lock,
-  binds its ports, and recovers all seventeen jobs from their checkpoints,
-  with the Workers following it through the HA directory. The checks do not
-  notice either.
+  start. At the goal in minute 67 the dispatcher's interval join, which
+  pairs each order with the position reports of the riders in its zone and
+  was declared rescalable when the job was submitted, is scaled to twice its
+  parallelism while it runs, for the surge the goal brings. At minute 75 the
+  gauges job is stopped at a savepoint, which commits its tail, and
+  resubmitted from that savepoint as a new job. At minute 95 the leading
+  Coordinator is killed; the standby takes the leader lock, binds its ports,
+  and recovers all seventeen jobs from their checkpoints, the dispatcher at
+  the parallelism it was scaled to, with the Workers following it through
+  the HA directory. After the last goal the join is scaled back. The checks
+  notice none of it.
 - **The protocol, checked against its specification.** Every clink process
   records the steps of the exactly-once protocol it takes (checkpoint
-  triggers, acknowledgements, completions, commits, restores): some 138,000
+  triggers, acknowledgements, completions, commits, restores): some 150,000
   events across the two Coordinators and the Workers of a run, under
   `state/run/traces`. clink's specification has a trace validator that
   accepts a job's run only if every step is one the specification allows in
   that state, and every event names its job, so `TRACE_CHECK=1` validates
   each of the night's nineteen jobs on its own: the seventeen submitted, the
   gauges job resumed from its savepoint, and the backfill. In the last full
-  check seventeen were accepted, and two are outside the specification and
-  skipped, each with its reason: the ledgers job commits through sinks of
+  check sixteen were accepted, and three are outside the specification and
+  skipped, each with its reason: the dispatcher was rescaled, which the
+  specification does not model yet; the ledgers job commits through sinks of
   both families, a Kafka transaction beside two PostgreSQL tables, where the
   specification models one; and the resumed gauges job numbers its
   checkpoints on from its savepoint's, where the specification starts every
-  job at 1. The check takes about ten minutes, four jobs at a time.
+  job at 1. The check reads the run as it ended, with clink stopped, and
+  takes ten to twenty-five minutes, four jobs at a time.
 
 ## How it works
 
@@ -491,10 +498,21 @@ there before the round was called done:
   ones. It now takes an exclusive subscription that records its position
   at each checkpoint and seeks back to it, which is what lets the kitchen
   watch run with a minute of lateness.
+- SQL jobs declared no rescale bounds, so the dispatcher could not be
+  resized while it ran. A SQL job now opts in with `--max-parallelism`,
+  which declares the keyed stages whose output is inserts only: a stage that
+  revises what it emitted would have a key's updates reordered on their way
+  to the sink once the edge out of it is round-robin.
+- The clink test written for that scene found three defects in the rescale
+  itself, all now fixed: a stage chained with the stages it fed split from
+  them, and the replan restored those from a block they never wrote; after a
+  rescale no commit of a job with a Kafka transactional sink was confirmed
+  again, the Coordinator still waiting on the sinks' old places; and a
+  Coordinator failover after a rescale planned the job as submitted against
+  checkpoints at the new layout, and left it stopped until resubmitted.
 
-Still open, and noted here rather than hidden: SQL jobs declare no rescale
-bounds, so a running SQL job cannot be rescaled live; and MQTT and MongoDB
-are not reachable from SQL.
+Still open, and noted here rather than hidden: MQTT and MongoDB are not
+reachable from SQL.
 
 ## Dissecting it
 
@@ -585,12 +603,11 @@ search (OpenSearch), telemetry (InfluxDB), the lakehouse (Delta), the gauges
 4: the operational scenes, a savepoint stop and resume, a Coordinator
 failover, and the protocol trace checked against the specification. Round
 5: the footprint sampler, so a run ends with what clink and each system
-cost. Round 6: the rig scripts, dry-run only. A live
-rescale of the dispatcher during the surge waits for SQL jobs to declare
-rescale bounds, which clink's planner does not yet do; a job built on the
-typed API declares them with `.rescalable(min, max)`. Rider devices (MQTT) and the rider app's
-own store (MongoDB) are reached through clink's typed C++ API rather than
-SQL, and wait for a round with a compiled job.
+cost. Round 6: the rig scripts, dry-run only. Since then: the flight
+recorder, the trace checked job by job, the bus replayed in order, and the
+dispatcher resized live during a surge. Rider devices (MQTT) and the rider app's own
+store (MongoDB) are reached through clink's typed C++ API rather than SQL,
+and wait for a round with a compiled job.
 
 ## Licence
 
