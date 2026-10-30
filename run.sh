@@ -29,8 +29,8 @@
 # Coordinator is killed and the standby takes over, with every job recovered
 # from its checkpoints. Every clink process records its protocol trace under
 # state/run/traces; TRACE_CHECK=1 hands it to the exactly-once
-# specification's validator after the stores are checked (see the README for
-# why that is opt-in today).
+# specification's validator after the stores are checked, one job at a time
+# (about ten minutes, and it needs Java and a clink checkout).
 set -euo pipefail
 cd "$(dirname "$0")"
 ROOT="$(pwd)"
@@ -377,19 +377,20 @@ if [ "${SCENES}" = 1 ]; then
   lines="$(cat "${STATE}/traces"/*.ndjson | wc -l | tr -d ' ')"
   if [ "${TRACE_CHECK:-0}" = 1 ] && [ -x "${CLINK_SRC}/scripts/formal-check.sh" ]; then
     say "Checking the run's protocol trace against the exactly-once specification"
-    if "${CLINK_SRC}/scripts/formal-check.sh" --trace "${STATE}/traces" >"${STATE}/trace-check.log" 2>&1; then
-      echo "protocol trace: ${lines} events in ${n} process files, accepted by the specification  OK"
+    if TRACE_JOBS="${TRACE_JOBS:-4}" "${CLINK_SRC}/scripts/formal-check.sh" --trace "${STATE}/traces" \
+        >"${STATE}/trace-check.log" 2>&1; then
+      verdict="$(sed -nE 's/^formal-check: all ([0-9]+) validated trace\(s\) accepted; ([0-9]+) skipped.*/\1 jobs accepted, \2 outside the specification/p' "${STATE}/trace-check.log")"
+      echo "protocol trace: ${lines} events in ${n} process files; ${verdict} (see ${STATE}/trace-check.log)  OK"
     else
       echo "protocol trace: not accepted (see ${STATE}/trace-check.log)  FAIL"
       tail -20 "${STATE}/trace-check.log"
       rc=1
     fi
   else
-    # The specification's trace validator reads one job at a time, and the
-    # sink-side events carry no job id yet, so a trace of seventeen jobs is
-    # not separable by job. Recorded here for when it is; TRACE_CHECK=1 runs
-    # the validator regardless, with CLINK_SRC pointing at a clink checkout.
-    echo "protocol trace: ${lines} events in ${n} process files recorded under ${STATE}/traces (not checked: see README)"
+    # Validating every job's run against the specification takes about ten
+    # minutes and a Java runtime, so it is asked for: TRACE_CHECK=1, with
+    # CLINK_SRC pointing at a clink checkout.
+    echo "protocol trace: ${lines} events in ${n} process files recorded under ${STATE}/traces (not checked: TRACE_CHECK=1 checks it)"
   fi
 fi
 say "What the run cost"

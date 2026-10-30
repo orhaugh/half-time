@@ -99,15 +99,21 @@ model that never touched clink.
   binds its ports, and recovers all seventeen jobs from their checkpoints,
   with the Workers following it through the HA directory. The checks do not
   notice either.
-- **The protocol, recorded against its specification.** Every clink process
+- **The protocol, checked against its specification.** Every clink process
   records the steps of the exactly-once protocol it takes (checkpoint
-  triggers, acknowledgements, completions, commits, restores): some 115,000
+  triggers, acknowledgements, completions, commits, restores): some 138,000
   events across the two Coordinators and the Workers of a run, under
   `state/run/traces`. clink's specification has a trace validator that
-  accepts a run only if every step is one the specification allows in that
-  state, and it reads one job at a time; the sink-side events do not yet
-  carry the job id, so a seventeen-job trace is not separable and the
-  validation waits for that (`TRACE_CHECK=1` runs it regardless).
+  accepts a job's run only if every step is one the specification allows in
+  that state, and every event names its job, so `TRACE_CHECK=1` validates
+  each of the night's nineteen jobs on its own: the seventeen submitted, the
+  gauges job resumed from its savepoint, and the backfill. In the last full
+  check seventeen were accepted, and two are outside the specification and
+  skipped, each with its reason: the ledgers job commits through sinks of
+  both families, a Kafka transaction beside two PostgreSQL tables, where the
+  specification models one; and the resumed gauges job numbers its
+  checkpoints on from its savepoint's, where the specification starts every
+  job at 1. The check takes about ten minutes, four jobs at a time.
 
 ## How it works
 
@@ -384,7 +390,7 @@ systems around the core:
 | the InfluxDB measurement | one point per report, exactly: the store keeps one value per series and time |
 | the Pushgateway | each zone's multiplier equal to the topic's row for the window it names, at or near the latest |
 | `dispatch_decisions_backfill` | every decision the archive holds, as the topic has it |
-| the protocol trace | recorded for every process; checked against the exactly-once specification once the trace vocabulary carries the job id (`TRACE_CHECK=1` with `CLINK_SRC` set to a clink checkout runs `scripts/formal-check.sh --trace` today) |
+| the protocol trace | recorded for every process; with `TRACE_CHECK=1` and `CLINK_SRC` set to a clink checkout, each job's run validated against the exactly-once specification by `scripts/formal-check.sh --trace`: accepted, or skipped as outside it with the reason |
 
 The night ends, and a stream does not. The checks require every row the
 stream's watermark could have reached: the pricing windows up to the last
@@ -476,6 +482,10 @@ there before the round was called done:
 - A job submitted to a Coordinator could not arm the flight recorder: the
   flag reached the embedded path only, and a takeover rebuilt a job without
   it. Both now carry it, which is what made the trace above possible.
+- The sinks' own events in the protocol trace named no job, so a run of
+  seventeen jobs could not be checked against the exactly-once
+  specification at all. They now name it, and the check validates each
+  job of a run on its own.
 - The Pulsar source could replay a restart only by broker redelivery,
   which hands a restarted consumer its unacknowledged messages after newer
   ones. It now takes an exclusive subscription that records its position
@@ -483,10 +493,8 @@ there before the round was called done:
   watch run with a minute of lateness.
 
 Still open, and noted here rather than hidden: SQL jobs declare no rescale
-bounds, so a running SQL job cannot be rescaled live; the protocol trace's
-sink events carry no job id, so a run of many jobs cannot be validated
-against the specification job by job; and MQTT and MongoDB are not
-reachable from SQL.
+bounds, so a running SQL job cannot be rescaled live; and MQTT and MongoDB
+are not reachable from SQL.
 
 ## Dissecting it
 
