@@ -161,3 +161,34 @@ def influxdb_url():
 
 def pushgateway_url():
     return os.environ.get("HT_PUSHGATEWAY", f"http://localhost:{os.environ.get('PUSHGATEWAY_HOST_PORT', '29091')}")
+
+
+# The riders' devices (MQTT) and the rider app's store (MongoDB), which the
+# riders job, the typed C++ one, joins.
+#
+#    HT_MQTT            the riders' devices    host:port   default 127.0.0.1:${MOSQUITTO_HOST_PORT:-1883}
+#    HT_MONGO           the rider app's store  host:port   default mongo:27017 inside the compose network
+MOSQUITTO_IMAGE = "eclipse-mosquitto:2"
+MONGO_IMAGE = "mongo:7"
+
+
+def mqtt_address():
+    """Where the feeder publishes: the broker's host-side address."""
+    host, port = _host_port("HT_MQTT", f"127.0.0.1:{os.environ.get('MOSQUITTO_HOST_PORT', '1883')}")
+    return host, int(port)
+
+
+def mosquitto_sub(*args):
+    if MODE == "rig":
+        host, port = mqtt_address()
+        return ["docker", "run", "--rm", "-i", "--network", "host", MOSQUITTO_IMAGE,
+                "mosquitto_sub", "-h", host, "-p", str(port), *args]
+    return ["docker", "compose", "exec", "-T", "mosquitto", "mosquitto_sub", "-h", "localhost", *args]
+
+
+def mongosh(*args):
+    if MODE == "rig":
+        host, port = _host_port("HT_MONGO", "mongo:27017")
+        return ["docker", "run", "--rm", "-i", "--network", "host", MONGO_IMAGE,
+                "mongosh", "--quiet", f"mongodb://{host}:{port}/", *args]
+    return ["docker", "compose", "exec", "-T", "mongo", "mongosh", "--quiet", *args]

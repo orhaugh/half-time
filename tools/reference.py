@@ -45,6 +45,7 @@ class Reference:
         self.menus = rows("menus.jsonl")
         self.menu_changes = rows("menu_changes.jsonl")
         self.match = rows("match.jsonl")
+        self.devices = rows("devices.jsonl")
         # Watermarks at the end of the night: the latest time each stream
         # reached, less the lag every table declares.
         lag = 60_000
@@ -251,6 +252,37 @@ class Reference:
         ended; the idle timeout may release them."""
         return {k for k, v in self.alerts().items() if v[3] >= self.wm_kitchen}
 
+    # jobs/riders (the typed C++ job)
+    def riders_latest(self):
+        """rider_id -> the report the rider app's store keeps: the rider's latest,
+        by the phone's clock."""
+        out = {}
+        for d in self.devices:
+            if d["rider_id"] not in out or d["ts"] > out[d["rider_id"]]["ts"]:
+                out[d["rider_id"]] = d
+        return out
+
+    def low_battery_episodes(self):
+        """(rider_id, from_ts) -> until_ts: each stretch from a report below
+        LOW_BATTERY_PCT, while the rider was not already in one, to the first report
+        back at CHARGED_PCT (None if the night ends first). A command to charge
+        belongs to the episode whose stretch holds the report it answers."""
+        by_rider = defaultdict(list)
+        for d in self.devices:
+            by_rider[d["rider_id"]].append(d)
+        out = {}
+        for rid, reports in by_rider.items():
+            reports.sort(key=lambda d: d["ts"])
+            start = None
+            for d in reports:
+                if start is None and d["battery_pct"] < W.LOW_BATTERY_PCT:
+                    start = d["ts"]
+                    out[(rid, start)] = None
+                elif start is not None and d["battery_pct"] >= W.CHARGED_PCT:
+                    out[(rid, start)] = d["ts"]
+                    start = None
+        return out
+
     # pipeline/match.sql
     def goal_orders(self):
         """(goal_seq, order_id) -> (goal_minute, cell, placed_at): the orders placed
@@ -297,6 +329,8 @@ def main():
     print(f"  menu stream: {len(ref.menus)} items, {len(ref.menu_changes)} changes; tablet events: "
           f"{len(ref.kitchen)}, {bounced} bounces; alerts: {len(ref.alerts())}, "
           f"{len(ref.late_alerts())} at the end of the stream")
+    print(f"  riders' phones: {len(ref.devices)} reports from {len(ref.riders_latest())} riders; "
+          f"low-battery episodes: {len(ref.low_battery_episodes())}")
 
 
 if __name__ == "__main__":

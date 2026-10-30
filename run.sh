@@ -6,7 +6,9 @@
 #   SPEED=30 ./run.sh                          the night at thirty times real time
 #   DISPATCH_PARALLELISM=3 ./run.sh            the dispatcher three ways (see README)
 #   SCENES=0 ./run.sh                          the night without the operational scenes
-#   CLINK_SRC=<clink checkout> ./run.sh        where scripts/formal-check.sh is (default ../clink)
+#   CLINK_SRC=<clink checkout> ./run.sh        where scripts/formal-check.sh is (default ../clink), and
+#                                              whose build/ the riders job is built against
+#   CLINK_PREFIX=<installed clink> ./run.sh    build the riders job against this clink install instead
 #   CAPTURE_JOBS="kitchen" ./run.sh            record these jobs with clink's flight recorder (see README)
 #   CLEANUP=1 ... ./run.sh                     and remove everything at the end
 #
@@ -54,6 +56,8 @@ REDIS_HOST_PORT="${REDIS_HOST_PORT:-6379}"
 OPENSEARCH_HOST_PORT="${OPENSEARCH_HOST_PORT:-29200}"
 INFLUXDB_HOST_PORT="${INFLUXDB_HOST_PORT:-28086}"
 PUSHGATEWAY_HOST_PORT="${PUSHGATEWAY_HOST_PORT:-29091}"
+MOSQUITTO_HOST_PORT="${MOSQUITTO_HOST_PORT:-1883}"
+MONGO_HOST_PORT="${MONGO_HOST_PORT:-27017}"
 PROMETHEUS_HOST_PORT="${PROMETHEUS_HOST_PORT:-29090}"
 GRAFANA_HOST_PORT="${GRAFANA_HOST_PORT:-23000}"
 MATCH_FEED_PORT="${MATCH_FEED_PORT:-28090}"
@@ -147,6 +151,24 @@ psql_q() {  # <sql>: one value
 say "The night, generated"
 python3 -I tools/world.py --out state/world
 
+say "Building the riders job, the typed C++ one, against clink"
+# A module built against clink's installed CMake package: CLINK_PREFIX when
+# given, else the clink checkout's build installed into .clink/prefix.
+mkdir -p "${ROOT}/.clink"
+if [ -z "${CLINK_PREFIX:-}" ]; then
+  [ -d "${CLINK_SRC}/build" ] || {
+    echo "run.sh: the riders job needs a clink to build against: CLINK_PREFIX, or CLINK_SRC with a build/" >&2
+    exit 1
+  }
+  cmake --install "${CLINK_SRC}/build" --prefix "${ROOT}/.clink/prefix" >"${ROOT}/.clink/install.log" 2>&1
+  CLINK_PREFIX="${ROOT}/.clink/prefix"
+fi
+cmake -S jobs/riders -B "${ROOT}/.clink/riders" -DCMAKE_PREFIX_PATH="${CLINK_PREFIX}" \
+  -DCMAKE_BUILD_TYPE=Release >"${ROOT}/.clink/riders-configure.log" 2>&1
+cmake --build "${ROOT}/.clink/riders" --parallel 4 >"${ROOT}/.clink/riders-build.log" 2>&1 \
+  || { tail -20 "${ROOT}/.clink/riders-build.log" >&2; exit 1; }
+echo "riders job: .clink/riders/riders.so, built against ${CLINK_PREFIX}"
+
 say "Starting every system from empty"
 docker compose down -v --remove-orphans >/dev/null 2>&1 || true
 rm -rf "${ROOT}/state/archive" && mkdir -p "${ROOT}/state/archive"
@@ -154,7 +176,7 @@ rm -rf "${ROOT}/state/archive" && mkdir -p "${ROOT}/state/archive"
 # up --wait takes a one-shot that finishes while a slow service is still
 # starting for a failure.
 docker compose up -d --wait kafka postgres neo4j clickhouse mysql pulsar rabbitmq nats redis cassandra \
-  opensearch influxdb pushgateway prometheus grafana
+  opensearch influxdb pushgateway prometheus grafana mosquitto mongo
 docker compose run --rm --no-deps -T kafka-init
 docker compose run --rm --no-deps -T nats-init
 docker compose exec -T postgres psql -q -v ON_ERROR_STOP=1 -U halftime -d halftime -f - <postgres/schema.sql
@@ -173,7 +195,7 @@ for i in $(seq 1 60); do
   sleep 2
 done
 
-say "Starting the match feed, a Coordinator and two Workers, and submitting the seventeen jobs"
+say "Starting the match feed, a Coordinator and two Workers, and submitting the eighteen jobs"
 rm -rf "${STATE}" && mkdir -p "${STATE}/traces"
 # Every clink process records its protocol trace here (see the end of the run).
 export CLINK_PROTOCOL_TRACE_DIR="${STATE}/traces"
@@ -270,6 +292,28 @@ nodes = json.load(sys.stdin).get("nodes", [])
 print(next((n.get("parallelism", 1) for n in nodes if n.get("id") == sys.argv[1]), "?"))' "$2" \
     || echo "?"
 }
+# The riders job, the typed C++ one: a module, submitted over the control port.
+# It tells the Workers where the broker and the store are, as the SQL jobs'
+# tables do.
+# `clink run --job` exits 8 when it has not seen the job complete, which with
+# --wait-timeout-s=0 it never waits to: the submission is judged by its reply.
+HALFTIME_MQTT_HOST=127.0.0.1 HALFTIME_MQTT_PORT="${MOSQUITTO_HOST_PORT}" \
+  HALFTIME_MONGO_URI="mongodb://127.0.0.1:${MONGO_HOST_PORT}/?directConnection=true" \
+  "${BIN}/clink" run --job="${ROOT}/.clink/riders/riders.so" --coordinator-host=127.0.0.1 \
+  --coordinator-port="$(coord_ctl)" --name=riders --wait-timeout-s=0 \
+  --checkpoint-dir="${STATE}/checkpoints" --checkpoint-interval-ms=2000 \
+  >"${STATE}/riders.submit.out" 2>"${STATE}/riders.submit.err" || true
+submitted="$(grep '^{' "${STATE}/riders.submit.out" | tail -1 || true)"
+case "${submitted}" in
+  *'"ok":true'*) echo "${submitted}" ;;
+  *) grep -hv 'registry.replace' "${STATE}/riders.submit.out" "${STATE}/riders.submit.err" >&2; exit 1 ;;
+esac
+riders_job="$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["job_id"])' "${submitted}")"
+printf '%s\t%s\n' riders "${riders_job}" >>"${STATE}/jobs.tsv"
+# What the riders job tells the riders, recorded for the check.
+docker compose exec -T mosquitto mosquitto_sub -h localhost -t riders/commands -q 1 -v \
+  -c -i halftime-commands-recorder >"${STATE}/commands.txt" 2>/dev/null &
+pids+=($!)
 rescale_join() {  # <parallelism>
   "${BIN}/clink" rescale-op --job-id="${dispatch_job}" --op="${dispatch_join}" --parallelism="$1" \
     --coordinator-host=127.0.0.1 --coordinator-port="$(coord_ctl)"
@@ -313,6 +357,8 @@ python3 -I tools/feed_kitchen.py --speed "${SPEED}" --start-at "${start_at}" &
 kitchen_pid=$!
 python3 -I tools/feed_menus.py --speed "${SPEED}" --start-at "${start_at}" &
 menus_pid=$!
+python3 -I tools/feed_devices.py --speed "${SPEED}" --start-at "${start_at}" &
+devices_pid=$!
 # Half-time starts at minute 45; the kill lands in the thick of it.
 for _ in $(seq 1 1200); do
   m="$(cat "${STATE}/orders.progress" 2>/dev/null || echo -99)"
@@ -386,6 +432,7 @@ wait "${pings_pid}"
 wait "${orders_pid}"
 wait "${kitchen_pid}"
 wait "${menus_pid}"
+wait "${devices_pid}"
 
 say "Producers resend a batch of reports and a batch of tablet events they had already delivered"
 python3 -I tools/feed_pings.py --resend 2000
@@ -424,6 +471,7 @@ rc=0
 python3 -I tools/check_run.py --wait 300 || rc=1
 python3 -I tools/check_round2.py --wait 120 || rc=1
 python3 -I tools/check_round3.py --wait 120 || rc=1
+python3 -I tools/check_riders.py --wait 120 || rc=1
 if [ "${SCENES}" = 1 ]; then
   check_trace=0
   [ "${TRACE_CHECK:-0}" = 1 ] && [ -x "${CLINK_SRC}/scripts/formal-check.sh" ] && check_trace=1

@@ -26,6 +26,8 @@
 #   PUSHGATEWAY_HOST_PORT the gauges                       default 29091
 #   PROMETHEUS_HOST_PORT  Prometheus                       default 29090
 #   GRAFANA_HOST_PORT     Grafana (admin / halftime)       default 23000
+#   MOSQUITTO_HOST_PORT   the riders' devices (MQTT)       default 1883
+#   MONGO_HOST_PORT       the rider app's store            default 27017
 # Pulsar's broker port (6650) and Cassandra's native port (9042) stay as they
 # are: both protocols tell a client the address to come back to, and these
 # say 127.0.0.1 with the port the container listens on (PULSAR_ADVERTISED and
@@ -266,6 +268,36 @@ services:
       interval: 3s
       timeout: 5s
       retries: 40
+
+  # The riders' devices. Each device publishes its status to a topic of its
+  # own, riders/<id>/status, retained, so a subscriber that comes back after a
+  # crash is handed every rider's latest status; the riders job publishes its
+  # commands to riders/commands. The image's own configuration without
+  # authentication, which the loopback-only port allows here and nowhere else.
+  mosquitto:
+    image: eclipse-mosquitto:2
+    command: ["mosquitto", "-c", "/mosquitto-no-auth.conf"]
+    ports:
+      - "127.0.0.1:${MOSQUITTO_HOST_PORT:-1883}:1883"
+    healthcheck:
+      test: ["CMD", "mosquitto_pub", "-h", "localhost", "-t", "health", "-m", "ok"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+
+  # The rider app's own store, one standalone server: the riders job upserts
+  # each rider's latest status into it and nothing reads its change stream,
+  # which only a replica set has. The cache is kept small for one machine.
+  mongo:
+    image: mongo:7
+    command: ["mongod", "--bind_ip_all", "--wiredTigerCacheSizeGB", "0.25"]
+    ports:
+      - "127.0.0.1:${MONGO_HOST_PORT:-27017}:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ ping: 1 }).ok"]
+      interval: 3s
+      timeout: 10s
+      retries: 60
 
   # The customer app's order history. One node; cassandra/schema.cql makes
   # the keyspace and the table, which the sink expects to exist. A driver that

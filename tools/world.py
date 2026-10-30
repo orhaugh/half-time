@@ -91,6 +91,11 @@ BOUNCE_FROM = 1.5                   # a kitchen is overloaded from this phase mu
 ALERT_RUN = 3                       # consecutive bounces that raise an alert
 GOAL_SURGE_MS = 2 * MIN             # the orders placed this long after a goal are its surge
 KITCHEN_LAG_MS = 1 * MIN            # the tablet bus's lateness allowance (pipeline/kitchen.sql)
+DEVICE_EVERY_MS = 2 * MIN           # each rider's phone reports its status this often
+DRAIN_PCT_PER_MIN = 0.3             # the battery drains while the rider rides
+CHARGE_PCT_PER_MIN = 4.0            # and charges on a break
+LOW_BATTERY_PCT = 15                # below this the riders job tells the rider to charge
+CHARGED_PCT = 30                    # and tells them again only once it has been back at this
 DISHES = ["margherita", "pad thai", "bibimbap", "shawarma", "ramen", "pho", "jollof rice",
           "nyama choma", "bacalhau", "francesinha", "okonomiyaki", "takoyaki", "biryani",
           "falafel wrap", "poke bowl", "lamb tagine", "pierogi", "arepas", "ceviche",
@@ -352,6 +357,29 @@ def kitchen(rng, orders, restaurants):
     return events
 
 
+def devices(rng, riders):
+    """Every report the riders' phones make, in time order: the rider's
+    battery, and whether the rider is riding or on a break. The battery drains
+    while the rider rides and charges on the break."""
+    reports = []
+    start, end = T0 + START_MIN * MIN, T0 + PINGS_UNTIL_MIN * MIN
+    step_min = DEVICE_EVERY_MS / MIN
+    for r in riders:
+        level = float(rng.randint(30, 100))
+        t = start + rng.randrange(0, DEVICE_EVERY_MS)
+        while t < end:
+            resting = r["break_from_ms"] is not None and r["break_from_ms"] <= t < r["break_until_ms"]
+            reports.append({"ts": t, "rider_id": r["rider_id"], "cell": r["cell"],
+                            "battery_pct": int(level), "state": "on_break" if resting else "riding"})
+            if resting:
+                level = min(100.0, level + CHARGE_PCT_PER_MIN * step_min)
+            else:
+                level = max(1.0, level - DRAIN_PCT_PER_MIN * step_min)
+            t += DEVICE_EVERY_MS
+    reports.sort(key=lambda d: (d["ts"], d["rider_id"]))
+    return reports
+
+
 def match_events():
     """The broadcaster's feed: what happened on the pitch, when. A goal's time
     is the start of its minute, which is when the orders surge."""
@@ -405,6 +433,9 @@ def main():
     rng2 = random.Random(SEED + 1)
     items, menu_changes = menus(rng2, restaurants)
     tablet = kitchen(rng2, orders, restaurants)
+    # The phones draw from a generator of their own, so adding them changed
+    # nothing else in the night.
+    reports = devices(random.Random(SEED + 2), riders)
     (out / "cells.json").write_text(json.dumps(cells, indent=1))
     write_jsonl(out / "restaurants.jsonl", restaurants)
     write_jsonl(out / "customers.jsonl", customers)
@@ -416,6 +447,7 @@ def main():
     write_jsonl(out / "menu_changes.jsonl", menu_changes)
     write_jsonl(out / "kitchen.jsonl", tablet)
     write_jsonl(out / "match.jsonl", match_events())
+    write_jsonl(out / "devices.jsonl", reports)
     cancelled = sum(1 for o in orders if o["cancelled_at"] is not None)
     bounced = sum(1 for e in tablet if e["status"] == "bounced")
     manifest = {"seed": SEED, "t0_ms": T0, "cells": CELLS, "phases": PHASES, "goals": GOALS,
@@ -423,7 +455,7 @@ def main():
                 "riders": len(riders), "orders": len(orders), "cancelled": cancelled,
                 "changes": len(changes), "pings": len(pings),
                 "menu_items": len(items), "menu_changes": len(menu_changes),
-                "kitchen_events": len(tablet), "bounces": bounced,
+                "kitchen_events": len(tablet), "bounces": bounced, "device_reports": len(reports),
                 "first_ms": T0 + START_MIN * MIN, "last_order_ms": orders[-1]["placed_at"],
                 "pings_until_ms": T0 + PINGS_UNTIL_MIN * MIN}
     (out / "manifest.json").write_text(json.dumps(manifest, indent=1))
@@ -435,6 +467,7 @@ def main():
     print("orders by phase: " + ", ".join(f"{k} {v}" for k, v in per_phase.items()))
     print(f"the kitchens: {len(items)} menu items, {len(menu_changes)} menu changes, "
           f"{len(tablet)} tablet events of which {bounced} bounces")
+    print(f"the riders' phones: {len(reports)} status reports")
 
 
 if __name__ == "__main__":

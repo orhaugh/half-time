@@ -16,23 +16,28 @@ live in a MySQL system that will stay MySQL, their tablets talk on Pulsar, a
 kitchen that bounces three orders in a row is reported to the floor over
 NATS, an order no rider was near goes to the operations desk's RabbitMQ queue
 and to the partners' Pulsar topic, and every order's latest state is kept in
-Redis and its history in Cassandra. The broadcaster's feed is polled over
+Redis and its history in Cassandra. The riders' phones report their
+batteries over MQTT, and a job built on clink's C++ API keeps each rider's
+latest status in the rider app's MongoDB store and tells a rider whose
+battery runs low to charge. The broadcaster's feed is polled over
 HTTP and each goal's surge of orders is counted, every menu change is
 indexed in OpenSearch, every rider position is a point in InfluxDB, the order
 stream is a Delta table, each zone's multiplier is a gauge Prometheus scrapes
 and Grafana shows beside clink's own metrics, and after the night a bounded
 job reads the dispatch archive back.
 
-It is a deliberately convoluted pipeline, because real ones are. Eighteen
-jobs read and write ten Kafka topics, a PostgreSQL change stream, a MySQL
-change stream, an HTTP feed, two PostgreSQL ledgers and a price table, a
-Neo4j city graph, eight ClickHouse tables, three Parquet archives, a Delta
-table, two Pulsar topics, a RabbitMQ queue, a NATS stream, two Redis
-keyspaces, a Cassandra table, an OpenSearch index, an InfluxDB bucket and a
-Pushgateway, and the outputs of one job are the inputs of the next. A worker is killed in the
-middle of the half-time surge, producers resend batches they had already
-delivered, and every store is then checked, row by row, against a reference
-model that never touched clink.
+It is a deliberately convoluted pipeline, because real ones are. Nineteen
+jobs, eighteen in SQL and one built on clink's C++ API, read and write ten
+Kafka topics, a PostgreSQL change stream, a MySQL change stream, an HTTP
+feed, two PostgreSQL ledgers and a price table, a Neo4j city graph, eight
+ClickHouse tables, three Parquet archives, a Delta table, two Pulsar topics,
+a RabbitMQ queue, a NATS stream, two Redis keyspaces, a Cassandra table, an
+OpenSearch index, an InfluxDB bucket, a Pushgateway, an MQTT broker's device
+and command topics and a MongoDB collection, and the outputs of one job are
+the inputs of the next. A worker is killed in the middle of the half-time
+surge, producers resend batches they had already delivered, and every store
+is then checked, row by row, against a reference model that never touched
+clink.
 
 ## What it shows
 
@@ -92,6 +97,21 @@ model that never touched clink.
   producer resends two thousand position reports and another five hundred
   tablet events. Every topic, queue, stream, key and table is then checked
   against what the night's data says it must hold.
+- **A compiled job beside the SQL.** MQTT and MongoDB are not reachable from
+  clink's SQL, so the riders job is a C++ module, `jobs/riders`, built
+  against clink's installed CMake package with the recipe it ships,
+  `clink_add_job_module`, and submitted to the same Coordinator with `clink
+  run --job`. It reads every phone's status from the rider's own topic,
+  retained, keys it by rider, and keeps each rider's newest report by the
+  phone's clock in MongoDB, replacing the rider's document; it sends a
+  command to charge when a battery falls below 15 per cent, and not again
+  until it has been back at 30. It runs beside the SQL jobs through the
+  Worker kill and the Coordinator failover, which recovers it from the
+  module its manifest keeps. clink's MQTT source acknowledges a message once
+  it has read it, so a report lost with a killed Worker is not handed over
+  again; the retained topics hand the job every rider's latest status when
+  it subscribes again, and a battery stays low for several reports, so the
+  store is exact and every low-battery episode is answered.
 - **The operational scenes.** A standby Coordinator stands by from the
   start. At the goal in minute 67 the dispatcher's interval join, which
   pairs each order with the position reports of the riders in its zone and
@@ -100,27 +120,28 @@ model that never touched clink.
   gauges job is stopped at a savepoint, which commits its tail, and
   resubmitted from that savepoint as a new job. At minute 95 the leading
   Coordinator is killed; the standby takes the leader lock, binds its ports,
-  and recovers all seventeen jobs from their checkpoints, the dispatcher at
+  and recovers all eighteen jobs from their checkpoints, the dispatcher at
   the parallelism it was scaled to, with the Workers following it through
   the HA directory. After the last goal the join is scaled back. The checks
   notice none of it.
 - **The protocol, checked against its specification.** Every clink process
   records the steps of the exactly-once protocol it takes (checkpoint
-  triggers, acknowledgements, completions, commits, restores): some 150,000
+  triggers, acknowledgements, completions, commits, restores): some 145,000
   events across the two Coordinators and the Workers of a run, under
   `state/run/traces`. clink's specification has a trace validator that
   accepts a job's run only if every step is one the specification allows in
   that state, and every event names its job, so `TRACE_CHECK=1` validates
-  each of the night's nineteen jobs on its own: the seventeen submitted, the
-  gauges job resumed from its savepoint, and the backfill. In the last full
-  check sixteen were accepted, and three are outside the specification and
-  skipped, each with its reason: the dispatcher was rescaled, which the
-  specification does not model yet; the ledgers job commits through sinks of
-  both families, a Kafka transaction beside two PostgreSQL tables, where the
-  specification models one; and the resumed gauges job numbers its
-  checkpoints on from its savepoint's, where the specification starts every
-  job at 1. The check reads the run as it ended, with clink stopped, and
-  takes ten to twenty-five minutes, four jobs at a time.
+  each of the night's twenty jobs on its own: the seventeen SQL jobs
+  submitted, the riders job, the gauges job resumed from its savepoint, and
+  the backfill. In the last full check seventeen were accepted, and three
+  are outside the specification and skipped, each with its reason: the
+  dispatcher was rescaled, which the specification does not model yet; the
+  ledgers job commits through sinks of both families, a Kafka transaction
+  beside two PostgreSQL tables, where the specification models one; and the
+  resumed gauges job numbers its checkpoints on from its savepoint's, where
+  the specification starts every job at 1. The check reads the run as it
+  ended, with clink stopped, and takes ten to twenty-five minutes, four jobs
+  at a time.
 
 ## How it works
 
@@ -132,8 +153,9 @@ flowchart LR
         MY[("MySQL<br/>menus")]
         KE["kitchen.events"]
         MF["the match feed<br/>HTTP"]
+        DV["riders/+/status<br/>MQTT, retained"]
     end
-    subgraph clink["clink: eighteen jobs"]
+    subgraph clink["clink: nineteen jobs"]
         O["orders<br/>change stream, exactly once"]
         P["pricing<br/>5 min windows, every minute"]
         Q["quotes<br/>the price when placed"]
@@ -152,6 +174,7 @@ flowchart LR
         TM["telemetry"]
         G["gauges"]
         BF["backfill<br/>bounded, after the night"]
+        RJ["riders, C++<br/>latest status, low battery"]
     end
     OC["orders.changes"]
     PM["pricing.multipliers"]
@@ -176,6 +199,8 @@ flowchart LR
     IX[("InfluxDB<br/>rider_position")]
     PGW[("Pushgateway<br/>zone multipliers")]
     PR[("Prometheus<br/>and Grafana")]
+    MG[("MongoDB<br/>riderapp.riders")]
+    RC["riders/commands<br/>MQTT"]
     PG --> O --> OC
     OC --> P
     RP --> P --> PM
@@ -215,6 +240,8 @@ flowchart LR
     RP --> TM --> IX
     PM --> G --> PGW --> PR
     PQ --> BF --> CH
+    DV --> RJ --> MG
+    RJ --> RC
 ```
 
 | Job | Reads | Writes | Guarantee |
@@ -237,6 +264,7 @@ flowchart LR
 | `telemetry` | `riders.positions` | the InfluxDB measurement `rider_position` | at least once, one point per series and time |
 | `gauges` | `pricing.multipliers` | the Pushgateway gauge `halftime_zone_multiplier_pct`, scraped by Prometheus | at least once |
 | `backfill` | the dispatch archive's Parquet files, after the night | `dispatch_decisions_backfill` in ClickHouse | at least once; bounded |
+| `riders` (C++, `jobs/riders`) | the riders' phones over MQTT, `riders/+/status` | the MongoDB collection `riderapp.riders`, one document per rider; the MQTT topic `riders/commands` | upsert by rider, newest by the phone's clock; at least once |
 
 Each job is one SQL file under `pipeline/`, submitted to a Coordinator and
 two Workers. The same files run embedded with `clink run`.
@@ -291,13 +319,18 @@ restore cannot cross twice.
 
 ## Running it
 
-You need Docker, Python 3 and a clink build (the `clink` and `clink_node`
-binaries). Nothing else is installed on the host: the producers and the
-checks run each system's own tools inside its container, Kafka's in the
-broker's, `psql` in PostgreSQL's, `clickhouse-client` in ClickHouse's,
-`mysql`, `pulsar-client`, `redis-cli` and `cqlsh` in theirs, the `nats`
-command line in a throwaway container on the compose network, and RabbitMQ,
-OpenSearch, InfluxDB and the Pushgateway over HTTP. The fifteen containers
+You need Docker, Python 3, a clink build (the `clink` and `clink_node`
+binaries), and for the riders job CMake and a C++23 compiler: `run.sh`
+builds `jobs/riders` against the clink checkout in `CLINK_SRC` (default
+`../clink`), whose `build/` it installs into `.clink/prefix`, or against an
+installed clink named by `CLINK_PREFIX`. Nothing else is installed on the
+host: the producers and the checks run each system's own tools inside its
+container, Kafka's in the broker's, `psql` in PostgreSQL's,
+`clickhouse-client` in ClickHouse's, `mysql`, `pulsar-client`, `redis-cli`,
+`cqlsh`, `mongosh` and `mosquitto_sub` in theirs, the `nats` command line in
+a throwaway container on the compose network, and RabbitMQ, OpenSearch,
+InfluxDB and the Pushgateway over HTTP; the riders' phones publish with a
+few lines of Python of their own, `tools/mqtt.py`. The seventeen containers
 want about eight gigabytes of memory between them; Kafka, Cassandra,
 ClickHouse, OpenSearch and Pulsar take most of it.
 
@@ -306,22 +339,22 @@ CLINK_BIN_DIR=/path/to/clink/build ./run.sh
 ```
 
 `run.sh` generates the night, starts every system from empty, starts the
-match feed and clink, submits the seventeen streaming jobs, plays the night
-at thirty times real time (six minutes), kills Worker 1 at half-time and
-starts it again, resends a batch of reports and a batch of tablet events,
-runs the backfill, and checks every store. `SCENES=0` leaves out the
-standby Coordinator, the savepoint and the failover; otherwise they are part
-of every run. `SPEED=10` plays it slower; `CLEANUP=1` removes everything at
-the end. `CAPTURE_JOBS=kitchen` records the kitchen job with clink's flight
-recorder, for replaying offline afterwards (see "Dissecting it"); any of
-the jobs can be named. `DISPATCH_PARALLELISM=3` runs the dispatcher as three subtasks;
-every job otherwise runs as one. That needs a clink built after the fix to
-how a keyed row's state is filed for a restore, which the first run at
-parallelism three found. The stack otherwise stays up: Neo4j Browser is at
-http://localhost:7474, RabbitMQ's management UI at http://localhost:15672,
-Grafana at http://localhost:23000 (admin / halftime, with the half-time
-dashboard provisioned from `deploy/grafana`), Prometheus at
-http://localhost:29090, the Coordinator at http://localhost:8081, and
+match feed and clink, submits the seventeen SQL jobs and the riders job,
+plays the night at thirty times real time (six minutes), kills Worker 1 at
+half-time and starts it again, resends a batch of reports and a batch of
+tablet events, runs the backfill, and checks every store. `SCENES=0` leaves
+out the standby Coordinator, the savepoint and the failover; otherwise they
+are part of every run. `SPEED=10` plays it slower; `CLEANUP=1` removes
+everything at the end. `CAPTURE_JOBS=kitchen` records the kitchen job with
+clink's flight recorder, for replaying offline afterwards (see "Dissecting
+it"); any of the jobs can be named. `DISPATCH_PARALLELISM=3` runs the
+dispatcher as three subtasks; every job otherwise runs as one. That needs a
+clink built after the fix to how a keyed row's state is filed for a restore,
+which the first run at parallelism three found. The stack otherwise stays
+up: Neo4j Browser is at http://localhost:7474, RabbitMQ's management UI at
+http://localhost:15672, Grafana at http://localhost:23000 (admin / halftime,
+with the half-time dashboard provisioned from `deploy/grafana`), Prometheus
+at http://localhost:29090, the Coordinator at http://localhost:8081, and
 ClickHouse answers on port 29000. Every one of them listens on this
 machine's loopback address only: the systems take demo passwords, set in
 `docker-compose.yml`, and several none at all, so none is for a network.
@@ -379,8 +412,8 @@ of the same rules computed from the generated night alone, in event time:
 | the Parquet archives | every record of each stream, once |
 | the Neo4j graph | the generated cities, zones and restaurants |
 
-`tools/check_round2.py` and `tools/check_round3.py` do the same for the
-systems around the core:
+`tools/check_round2.py`, `tools/check_round3.py` and `tools/check_riders.py` do
+the same for the systems around the core:
 
 | Store | Held to |
 | --- | --- |
@@ -397,6 +430,8 @@ systems around the core:
 | the InfluxDB measurement | one point per report, exactly: the store keeps one value per series and time |
 | the Pushgateway | each zone's multiplier equal to the topic's row for the window it names, at or near the latest |
 | `dispatch_decisions_backfill` | every decision the archive holds, as the topic has it |
+| the MongoDB collection `riderapp.riders` | one document per rider, each rider's latest status as the model says (`tools/check_riders.py`) |
+| the MQTT topic `riders/commands` | a command to charge for every low-battery episode, at least once, each answering a report below 15 per cent with the battery the model gives |
 | the protocol trace | recorded for every process; with `TRACE_CHECK=1` and `CLINK_SRC` set to a clink checkout, each job's run validated against the exactly-once specification by `scripts/formal-check.sh --trace`: accepted, or skipped as outside it with the reason |
 
 The night ends, and a stream does not. The checks require every row the
@@ -510,9 +545,15 @@ there before the round was called done:
   again, the Coordinator still waiting on the sinks' old places; and a
   Coordinator failover after a rescale planned the job as submitted against
   checkpoints at the new layout, and left it stopped until resubmitted.
+- clink's MQTT sink talked to the broker only when it had something to
+  publish, so with nothing to send it missed its keepalive, the broker
+  dropped it, and its next flush restarted the riders job: the commands sink
+  was dropped in the first minutes of the night, before any rider's battery
+  ran low. It now keeps its connection while idle, and reconnects one that
+  dropped with nothing in flight.
 
-Still open, and noted here rather than hidden: MQTT and MongoDB are not
-reachable from SQL.
+Still open, and noted here rather than hidden: MQTT and MongoDB are reached
+through clink's C++ API, and not yet from its SQL.
 
 ## Dissecting it
 
@@ -522,6 +563,11 @@ ends, so the Coordinator's API is read while the night plays (about six
 minutes, with the time between the scenes to spare), and the files
 afterwards:
 
+- The riders job, the C++ one: its source is `jobs/riders/riders.cpp`, the
+  module `run.sh` built is `.clink/riders/riders.so`, the rider app's store
+  is `docker compose exec mongo mongosh riderapp --quiet --eval
+  'db.riders.find().limit(3)'` and the commands it sent are in
+  `state/run/commands.txt`.
 - A job's plan, without running it:
   `clink run pipeline/dispatch.sql --explain` prints the logical plan the
   planner built, join shape and all.
@@ -578,10 +624,10 @@ afterwards:
 `tools/world.py` draws the night from one seed: three cities of nine zones
 each, 36 restaurants, 1,200 customers, 216 riders and about 5,500 orders,
 some 21,000 changes to them and 190,000 position reports. Orders arrive at
-rates set by the match: fewer during play, a surge for two minutes after each
-goal, three times the rate at half-time, a lull during penalties and a rush
-after the whistle. Half the riders stop for six to twelve minutes after a
-goal or for the penalties. Riders work near a restaurant, the busier the
+rates set by the match: fewer during play, a surge for two minutes after
+each goal, three times the rate at half-time, a lull during penalties and a
+rush after the whistle. Half the riders stop for six to twelve minutes after
+a goal or for the penalties. Riders work near a restaurant, the busier the
 likelier, so a quiet restaurant can find no rider within reach. The kitchens
 and the menus are drawn apart from the rest, so they can change without a
 single order or report changing: 288 menu items and 178 changes to them
@@ -590,24 +636,26 @@ bounces, clustered at the busiest kitchens in the busiest minutes, so that
 59 runs of three reach the floor. The match feed is ten events: kick-off,
 four goals, half-time, the second half, extra time, the penalties and the
 final whistle, each at the start of its minute, which is when the orders
-surge.
+surge. The riders' phones are drawn apart too: each reports every two
+minutes, 19,440 reports in all, with a battery that drains while the rider
+rides and charges on a break, and 110 times a battery falls below 15 per
+cent.
 
 ## Status
 
-Round 1: the core pipeline, on one machine. Round 2: the systems around
-it, the legacy menu system (MySQL change data capture), the tablets' bus
+Round 1: the core pipeline, on one machine. Round 2: the systems around it,
+the legacy menu system (MySQL change data capture), the tablets' bus
 (Pulsar), the desk, the partners and the floor (RabbitMQ, Pulsar, NATS) and
 the tracker (Redis, Cassandra). Round 3: the match feed (HTTP polling),
 search (OpenSearch), telemetry (InfluxDB), the lakehouse (Delta), the gauges
 (Pushgateway, Prometheus, Grafana) and the backfill from the archive. Round
 4: the operational scenes, a savepoint stop and resume, a Coordinator
-failover, and the protocol trace checked against the specification. Round
-5: the footprint sampler, so a run ends with what clink and each system
-cost. Round 6: the rig scripts, dry-run only. Since then: the flight
-recorder, the trace checked job by job, the bus replayed in order, and the
-dispatcher resized live during a surge. Rider devices (MQTT) and the rider app's own
-store (MongoDB) are reached through clink's typed C++ API rather than SQL,
-and wait for a round with a compiled job.
+failover, and the protocol trace checked against the specification. Round 5:
+the footprint sampler, so a run ends with what clink and each system cost.
+Round 6: the rig scripts, dry-run only. Since then: the flight recorder, the
+trace checked job by job, the bus replayed in order, the dispatcher resized
+live during a surge, and the riders job, built on clink's C++ API, for the
+riders' phones (MQTT) and the rider app's store (MongoDB).
 
 ## Licence
 
