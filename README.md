@@ -319,8 +319,9 @@ restore cannot cross twice.
 
 ## Running it
 
-You need Docker, Python 3, a clink build (the `clink` and `clink_node`
-binaries), and for the riders job CMake and a C++23 compiler: `run.sh`
+You need Docker, Python 3, a clink build from its `main` branch (the `clink`
+and `clink_node` binaries), and for the riders job CMake and a C++23
+compiler: `run.sh`
 builds `jobs/riders` against the clink checkout in `CLINK_SRC` (default
 `../clink`), whose `build/` it installs into `.clink/prefix`, or against an
 installed clink named by `CLINK_PREFIX`. Nothing else is installed on the
@@ -551,6 +552,13 @@ there before the round was called done:
   was dropped in the first minutes of the night, before any rider's battery
   ran low. It now keeps its connection while idle, and reconnects one that
   dropped with nothing in flight.
+- Building the riders job turned up two gaps in submitting a compiled job. A
+  job module that registered its own operators had to register clink's
+  built-in channel types itself first, or its build failed with "T not
+  registered"; the macro that declares a job now registers them before the
+  job's code runs. And `clink run --job` exited with a failure on every
+  submission that did not wait for its job to complete, which a streaming job
+  never does; it now exits 0 once the Coordinator has accepted the job.
 
 Still open, and noted here rather than hidden: MQTT and MongoDB are reached
 through clink's C++ API, and not yet from its SQL.

@@ -25,7 +25,6 @@
 #include <string>
 
 #include <clink/api/pipeline.hpp>
-#include <clink/cluster/built_in_factories.hpp>
 #include <clink/config/json.hpp>
 #include <clink/core/codec.hpp>
 #include <clink/job/register_job.hpp>
@@ -182,8 +181,6 @@ std::string env_or(const char* name, const char* fallback) {
 }
 
 void define_job(clink::api::Pipeline& pipeline) {
-    // The channel types the key and the operators are declared on.
-    clink::cluster::ensure_built_ins_registered();
     auto& reg = pipeline.registry();
     reg.register_key_extractor<std::string>("halftime.rider", [](const std::string& s) {
         const auto r = parse(s);

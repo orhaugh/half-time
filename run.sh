@@ -294,20 +294,17 @@ print(next((n.get("parallelism", 1) for n in nodes if n.get("id") == sys.argv[1]
 }
 # The riders job, the typed C++ one: a module, submitted over the control port.
 # It tells the Workers where the broker and the store are, as the SQL jobs'
-# tables do.
-# `clink run --job` exits 8 when it has not seen the job complete, which with
-# --wait-timeout-s=0 it never waits to: the submission is judged by its reply.
+# tables do. With --wait-timeout-s=0 the submit returns once the Coordinator has
+# accepted the job.
 HALFTIME_MQTT_HOST=127.0.0.1 HALFTIME_MQTT_PORT="${MOSQUITTO_HOST_PORT}" \
   HALFTIME_MONGO_URI="mongodb://127.0.0.1:${MONGO_HOST_PORT}/?directConnection=true" \
   "${BIN}/clink" run --job="${ROOT}/.clink/riders/riders.so" --coordinator-host=127.0.0.1 \
   --coordinator-port="$(coord_ctl)" --name=riders --wait-timeout-s=0 \
   --checkpoint-dir="${STATE}/checkpoints" --checkpoint-interval-ms=2000 \
-  >"${STATE}/riders.submit.out" 2>"${STATE}/riders.submit.err" || true
-submitted="$(grep '^{' "${STATE}/riders.submit.out" | tail -1 || true)"
-case "${submitted}" in
-  *'"ok":true'*) echo "${submitted}" ;;
-  *) grep -hv 'registry.replace' "${STATE}/riders.submit.out" "${STATE}/riders.submit.err" >&2; exit 1 ;;
-esac
+  >"${STATE}/riders.submit.out" 2>"${STATE}/riders.submit.err" \
+  || { grep -hv 'registry.replace' "${STATE}/riders.submit.out" "${STATE}/riders.submit.err" >&2; exit 1; }
+submitted="$(grep '^{' "${STATE}/riders.submit.out" | tail -1)"
+echo "${submitted}"
 riders_job="$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["job_id"])' "${submitted}")"
 printf '%s\t%s\n' riders "${riders_job}" >>"${STATE}/jobs.tsv"
 # What the riders job tells the riders, recorded for the check.
