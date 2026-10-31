@@ -24,7 +24,11 @@ services:
       RABBITMQ_DEFAULT_USER: halftime
       RABBITMQ_DEFAULT_PASS: halftime
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      # Asked only once the server has written its Erlang cookie. The check runs
+      # as root with HOME at the data directory, and a CLI that finds no cookie
+      # writes one there that the server, running as rabbitmq, cannot read: on a
+      # slow start the first check came first and the server failed with eacces.
+      test: ["CMD-SHELL", "[ -f /var/lib/rabbitmq/.erlang.cookie ] && rabbitmq-diagnostics -q ping"]
       interval: 5s
       timeout: 10s
       retries: 60
