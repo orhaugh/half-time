@@ -319,8 +319,8 @@ restore cannot cross twice.
 
 ## Running it
 
-You need Docker, Python 3, a clink build from its `main` branch (the `clink`
-and `clink_node` binaries), and for the riders job CMake and a C++23
+You need Docker, Python 3, clink 0.13.0 or later (the `clink` and
+`clink_node` binaries), and for the riders job CMake and a C++23
 compiler: `run.sh`
 builds `jobs/riders` against the clink checkout in `CLINK_SRC` (default
 `../clink`), whose `build/` it installs into `.clink/prefix`, or against an
@@ -349,9 +349,8 @@ are part of every run. `SPEED=10` plays it slower; `CLEANUP=1` removes
 everything at the end. `CAPTURE_JOBS=kitchen` records the kitchen job with
 clink's flight recorder, for replaying offline afterwards (see "Dissecting
 it"); any of the jobs can be named. `DISPATCH_PARALLELISM=3` runs the
-dispatcher as three subtasks; every job otherwise runs as one. That needs a
-clink built after the fix to how a keyed row's state is filed for a restore,
-which the first run at parallelism three found. The stack otherwise stays
+dispatcher as three subtasks; every job otherwise runs as one. The stack
+otherwise stays
 up: Neo4j Browser is at http://localhost:7474, RabbitMQ's management UI at
 http://localhost:15672, Grafana at http://localhost:23000 (admin / halftime,
 with the half-time dashboard provisioned from `deploy/grafana`), Prometheus

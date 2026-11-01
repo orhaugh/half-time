@@ -5,7 +5,7 @@
 # number of Workers.
 services:
   clink-worker:
-    image: ${CLINK_IMAGE:-ghcr.io/orhaugh/clink-runtime:main}
+    image: ${CLINK_IMAGE:-ghcr.io/orhaugh/clink-runtime:0.13.0}
     container_name: clink-worker
     network_mode: host
     ulimits:
