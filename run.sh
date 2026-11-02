@@ -288,7 +288,10 @@ dispatch_join="$(sed -nE 's/^rescalable up to parallelism [0-9]+: //p' "${STATE}
 graph_parallelism() {  # <job id> <operator id>
   curl -fsS "http://127.0.0.1:$(coord_http)/api/v1/jobs/$1/graph" 2>/dev/null | python3 -c '
 import json, sys
-nodes = json.load(sys.stdin).get("nodes", [])
+try:
+    nodes = json.load(sys.stdin).get("nodes", [])
+except ValueError:  # no answer, as while a takeover is under way
+    nodes = []
 print(next((n.get("parallelism", 1) for n in nodes if n.get("id") == sys.argv[1]), "?"))' "$2" \
     || echo "?"
 }
