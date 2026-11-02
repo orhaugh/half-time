@@ -6,7 +6,7 @@
 # does). The checkpoints and the protocol trace live on the same share.
 services:
   clink-coordinator:
-    image: ${CLINK_IMAGE:-ghcr.io/orhaugh/clink-runtime:0.13.0}
+    image: ${CLINK_IMAGE:-ghcr.io/orhaugh/clink-runtime:0.15.0}
     container_name: clink-coordinator
     network_mode: host
     ulimits:

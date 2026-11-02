@@ -25,7 +25,7 @@ RUN_ID="${RUN_ID:?set RUN_ID to the run id}"
 INV="rig/inventory/${RUN_ID}.json"
 KEY="${SSH_KEY_FILE:-$HOME/.ssh/half-time-ed25519}"
 SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o BatchMode=yes -i "${KEY}")
-CLINK_IMAGE="${CLINK_IMAGE:-ghcr.io/orhaugh/clink-runtime:0.13.0}"
+CLINK_IMAGE="${CLINK_IMAGE:-ghcr.io/orhaugh/clink-runtime:0.15.0}"
 CELLS="${CELLS:-12}"; RIDERS_PER_CELL="${RIDERS_PER_CELL:-300}"; RESTAURANTS_PER_CELL="${RESTAURANTS_PER_CELL:-40}"
 CUSTOMERS_PER_CELL="${CUSTOMERS_PER_CELL:-4000}"; ORDERS_PER_MINUTE="${ORDERS_PER_MINUTE:-60}"
 SPEED="${SPEED:-30}"; SLOTS="${SLOTS:-32}"; FEEDERS="${FEEDERS:-4}"; PARTITIONS="${PARTITIONS:-12}"
