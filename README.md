@@ -359,6 +359,59 @@ ClickHouse answers on port 29000. Every one of them listens on this
 machine's loopback address only: the systems take demo passwords, set in
 `docker-compose.yml`, and several none at all, so none is for a network.
 
+## Release evidence
+
+clink runs every showcase against a release candidate before it is tagged,
+and half-time is the one that does not fit a CI runner: seventeen
+containers, and a clink built from source with the connectors the release
+binaries leave out. So it is run here, against the candidate, and the run
+leaves a bundle that clink's release check judges.
+
+```bash
+sha=<the candidate commit>
+git -C ../clink worktree add --detach "../clink-${sha:0:12}" "${sha}"
+cmake -S "../clink-${sha:0:12}" -B "../clink-${sha:0:12}/build" -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DCLINK_BUILD_TESTS=OFF -DCLINK_INTEGRATION_TESTS=OFF -DCLINK_BUILD_EXAMPLES=OFF
+cmake --build "../clink-${sha:0:12}/build" --parallel 10
+CLINK_SRC="../clink-${sha:0:12}" ./evidence.sh "${sha}"
+```
+
+The checkout is a fresh worktree because clink records the commit it was
+built from when it is configured: a build directory configured at an older
+commit and rebuilt since still names the older one. `evidence.sh` refuses to
+start unless the checkout is exactly the candidate with nothing changed and
+`clink` and `clink_node` both report that commit, built clean. It then runs
+`run.sh` with every scene, and writes `evidence/<candidate>-<time>/`:
+
+- `evidence.json`, the summary the release check reads: the candidate, each
+  binary's commit and hash, the half-time commit and any local changes (the
+  diff is kept beside it), the host, the settings the run used and the size
+  of the generated night, the run's exit code, each checker's exit code, the
+  verdicts counted by guarantee, and what each scene did;
+- `scenes.jsonl`, written by `run.sh` as each scene completes: the Worker
+  kill, the rescale up, the savepoint, the Coordinator failover and the
+  rescale down, with what each was told and answered, and `skipped` for any
+  the run left out;
+- `verdicts.jsonl`, every verdict each checker printed, with the guarantee
+  it holds the store to: exactly once, at least once, upsert (a store kept at
+  each key's latest state), or a check of the values;
+- `checks/`, each checker's output; `logs/`, the Coordinators', Workers' and
+  submissions' logs; `jobs/`, the SQL as submitted; `traces/`, every
+  process's protocol trace, compressed; `run.log`, the run as it printed;
+- `MANIFEST.sha256`, the hash of every file.
+
+It leaves out the checkpoints and the HA directory, and replaces every
+password the run prints or the logs carry with `<redacted>`; a bundle in
+which one survives is not finished. A failed run still writes its bundle,
+which the release check then rejects, as it does a bundle for another
+commit, one with a scene skipped or a checker failing, and one whose files
+do not match their hashes. From a clink checkout:
+
+```bash
+scripts/check-half-time-evidence.py <bundle> --candidate <commit>
+scripts/check-showcases.sh --half-time-evidence <bundle>
+```
+
 ## Running it on a rig
 
 The same pipeline scales out on Hetzner Cloud, one host per system group

@@ -82,6 +82,16 @@ STATE="${ROOT}/state/run"
 
 say() { printf '\n==> %s\n' "$*"; }
 
+# What each fault and operational scene did, one JSON object a line in
+# state/run/scenes.jsonl, written once its steps have run: a step that fails
+# ends the run before its scene is recorded, and a scene the run leaves out is
+# recorded as skipped. The release evidence (evidence.sh) keeps the file.
+scene() {  # <scene> <executed|failed|skipped> [key=value ...]
+  python3 -c 'import json, sys
+print(json.dumps({"scene": sys.argv[1], "status": sys.argv[2], **dict(a.split("=", 1) for a in sys.argv[3:])}))' \
+    "$@" >>"${STATE}/scenes.jsonl"
+}
+
 pids=()
 worker1_pid=""
 coord_pid=""
@@ -366,18 +376,24 @@ for _ in $(seq 1 1200); do
   sleep 0.5
 done
 echo "match minute ${m}: orders in the order store: $(psql_q 'SELECT count(*) FROM orders')"
+killed_pid="${worker1_pid}"
 kill -9 "${worker1_pid}"
 wait "${worker1_pid}" 2>/dev/null || true
 sleep 2
 start_worker 1
 worker1_pid="${last_pid}"
+scene worker_loss executed worker=worker-1 signal=KILL minute="${m}" killed_pid="${killed_pid}" \
+  restarted_pid="${worker1_pid}"
 if [ "${SCENES}" = 1 ]; then
   # Minute 67, a goal: orders surge for two minutes, and the dispatcher's
   # join, which pairs each order with the riders near it, is scaled to twice
   # its parallelism while it runs. It restores its state from the last
   # completed checkpoint at the new layout, and the job replays from there.
   await_minute 67
-  echo "match minute ${m}: the dispatcher's join ${dispatch_join:-(none named)} to $((2 * DISPATCH_PARALLELISM)) subtasks: $(rescale_join $((2 * DISPATCH_PARALLELISM)) 2>&1)"
+  reply="$(rescale_join $((2 * DISPATCH_PARALLELISM)) 2>&1)" && status=executed || status=failed
+  echo "match minute ${m}: the dispatcher's join ${dispatch_join:-(none named)} to $((2 * DISPATCH_PARALLELISM)) subtasks: ${reply}"
+  scene rescale_up "${status}" minute="${m}" job_id="${dispatch_job}" op="${dispatch_join}" \
+    parallelism=$((2 * DISPATCH_PARALLELISM)) reply="${reply}"
   # Minute 75: the gauges job is stopped at a savepoint, which commits its
   # tail, and resubmitted from that savepoint as a new job.
   for _ in $(seq 1 1200); do
@@ -390,11 +406,14 @@ if [ "${SCENES}" = 1 ]; then
   savepoint="$(printf '%s' "${stopped}" | sed -nE 's/.*savepoint_checkpoint_id=([0-9]+).*/\1/p')"
   backend="$(curl -fsS "http://127.0.0.1:$(coord_http)/api/v1/jobs/${gauges_job}" | python3 -c 'import json, sys; print(json.load(sys.stdin).get("state_backend_uri", ""))')"
   capture=""; captured gauges && capture="${STATE}/capture/gauges"
-  "${BIN}/clink_submit_sql" --file "${STATE}/gauges.sql" --coordinator-host 127.0.0.1 --coordinator-port "$(coord_http)" \
+  resumed="$("${BIN}/clink_submit_sql" --file "${STATE}/gauges.sql" --coordinator-host 127.0.0.1 --coordinator-port "$(coord_http)" \
     --name gauges-resumed --checkpoint-dir "${STATE}/checkpoints" --checkpoint-interval-ms 2000 \
     ${backend:+--state-backend "${backend}"} ${capture:+--capture-dir "${capture}"} \
-    --restore-from-dir "${STATE}/checkpoints/_jobs/${gauges_job}" --restore-from-checkpoint-id "${savepoint}"
+    --restore-from-dir "${STATE}/checkpoints/_jobs/${gauges_job}" --restore-from-checkpoint-id "${savepoint}")"
+  echo "${resumed}"
   echo "the gauges job resumed from savepoint ${savepoint}"
+  scene savepoint executed minute="${m}" job=gauges job_id="${gauges_job}" stop_reply="${stopped}" \
+    savepoint_checkpoint_id="${savepoint}" resume_reply="${resumed}"
   # Minute 95: the leading Coordinator is killed; the standby takes the leader
   # lock, binds its ports, and recovers every job from its checkpoints.
   for _ in $(seq 1 1200); do
@@ -423,10 +442,20 @@ if [ "${SCENES}" = 1 ]; then
     [ "$(graph_parallelism "${dispatch_job}" "${dispatch_join}")" != "?" ] && break
     sleep 1
   done
-  echo "after the takeover the dispatcher's join runs as $(graph_parallelism "${dispatch_job}" "${dispatch_join}") subtasks"
+  after="$(graph_parallelism "${dispatch_job}" "${dispatch_join}")"
+  echo "after the takeover the dispatcher's join runs as ${after} subtasks"
+  scene coordinator_failover executed minute="${m}" killed_pid="${coord_pid}" \
+    standby_http_port="${CLINK_STANDBY_HTTP_PORT}" join_parallelism_after="${after}"
   # Minute 110, after the last goal's surge: back to its parallelism.
   await_minute 110
-  echo "match minute ${m}: the dispatcher's join back to ${DISPATCH_PARALLELISM}: $(rescale_join "${DISPATCH_PARALLELISM}" 2>&1)"
+  reply="$(rescale_join "${DISPATCH_PARALLELISM}" 2>&1)" && status=executed || status=failed
+  echo "match minute ${m}: the dispatcher's join back to ${DISPATCH_PARALLELISM}: ${reply}"
+  scene rescale_down "${status}" minute="${m}" job_id="${dispatch_job}" op="${dispatch_join}" \
+    parallelism="${DISPATCH_PARALLELISM}" reply="${reply}"
+else
+  for s in rescale_up savepoint coordinator_failover rescale_down; do
+    scene "${s}" skipped reason="SCENES=0"
+  done
 fi
 wait "${pings_pid}"
 wait "${orders_pid}"
@@ -468,10 +497,21 @@ done
 
 say "Checking every store against the reference model"
 rc=0
-python3 -I tools/check_run.py --wait 300 || rc=1
-python3 -I tools/check_round2.py --wait 120 || rc=1
-python3 -I tools/check_round3.py --wait 120 || rc=1
-python3 -I tools/check_riders.py --wait 120 || rc=1
+# Each checker's output and exit code are kept, in state/run/<checker>.out and
+# state/run/checks.tsv, and each verdict with the guarantee it holds the store
+# to in state/run/verdicts.jsonl (see Checks in tools/check_run.py).
+export HALFTIME_VERDICTS="${STATE}/verdicts.jsonl"
+: >"${STATE}/checks.tsv"
+check() {  # <checker> [args]
+  local code=0
+  python3 -I "tools/$1.py" "${@:2}" 2>&1 | tee "${STATE}/$1.out" || code=$?
+  printf '%s\t%s\n' "$1" "${code}" >>"${STATE}/checks.tsv"
+  [ "${code}" = 0 ] || rc=1
+}
+check check_run --wait 300
+check check_round2 --wait 120
+check check_round3 --wait 120
+check check_riders --wait 120
 if [ "${SCENES}" = 1 ]; then
   check_trace=0
   [ "${TRACE_CHECK:-0}" = 1 ] && [ -x "${CLINK_SRC}/scripts/formal-check.sh" ] && check_trace=1
@@ -490,9 +530,11 @@ if [ "${SCENES}" = 1 ]; then
         >"${STATE}/trace-check.log" 2>&1; then
       verdict="$(sed -nE 's/^formal-check: all ([0-9]+) validated trace\(s\) accepted; ([0-9]+) skipped.*/\1 jobs accepted, \2 outside the specification/p' "${STATE}/trace-check.log")"
       echo "protocol trace: ${lines} events in ${n} process files; ${verdict} (see ${STATE}/trace-check.log)  OK"
+      printf 'trace\t0\n' >>"${STATE}/checks.tsv"
     else
       echo "protocol trace: not accepted (see ${STATE}/trace-check.log)  FAIL"
       tail -20 "${STATE}/trace-check.log"
+      printf 'trace\t1\n' >>"${STATE}/checks.tsv"
       rc=1
     fi
   else

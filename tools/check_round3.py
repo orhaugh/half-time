@@ -139,7 +139,7 @@ def main():
     print("the telemetry store: every position report as a point")
     n = influx_count("rider_position", "x")
     c.judge(f"rider_position (InfluxDB): {n} points, expected {len(ref.pings)} (one per report; a report written "
-            f"twice is the same point)", n == len(ref.pings))
+            f"twice is the same point)", n == len(ref.pings), guarantee="upsert")
 
     print("the gauges: each zone's surge multiplier on the Pushgateway, at its latest window")
     mult = topic("pricing.multipliers")
@@ -157,7 +157,8 @@ def main():
     c.judge(f"halftime_zone_multiplier_pct: {len(gauges)} of {len(latest)} zones in the last push, each with "
             f"the topic's value for the window it names; {sum(1 for b in behind.values() if b == 0)} at the "
             f"latest window, the rest within {max(behind.values()) if behind else 0} windows of it",
-            consistent and gauges and len(gauges) <= len(latest) and all(b <= 2 for b in behind.values()))
+            consistent and gauges and len(gauges) <= len(latest) and all(b <= 2 for b in behind.values()),
+            guarantee="upsert")
 
     print("the backfill: the dispatch archive read back beside the live table")
     bf = ch("SELECT order_id, kind, rider_id FROM halftime.dispatch_decisions_backfill")

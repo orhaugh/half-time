@@ -94,13 +94,26 @@ def latency_line(label, values):
 
 
 class Checks:
+    """Every verdict is printed, and when HALFTIME_VERDICTS names a file it is
+    also appended to it as a JSON line: the checker, the guarantee the store is
+    held to (exactly_once, at_least_once or upsert, or value for a check of
+    what the rows hold), the line printed and whether it held. The release
+    evidence (evidence.sh) keeps that file, so the three guarantees stay
+    apart in what it records."""
+
     def __init__(self, ref):
         self.ref = ref
         self.ok = True
+        self.record = os.environ.get("HALFTIME_VERDICTS")
+        self.checker = Path(sys.argv[0]).stem
 
-    def judge(self, line, ok):
+    def judge(self, line, ok, guarantee="value"):
         self.ok = self.ok and ok
         print("  " + line + verdict(ok))
+        if self.record:
+            with open(self.record, "a") as f:
+                f.write(json.dumps({"checker": self.checker, "guarantee": guarantee,
+                                    "line": line, "ok": bool(ok)}) + "\n")
 
     def exactly_once(self, what, got_keys, expected_keys, optional=frozenset()):
         """Rows keyed for identity: every expected key once, nothing else. An
@@ -120,7 +133,7 @@ class Checks:
             detail += f", {len(extra)} unexpected"
         if twice:
             detail += f", {twice} repeated"
-        self.judge(f"{what}: {detail}", ok)
+        self.judge(f"{what}: {detail}", ok, "exactly_once")
         return ok
 
     def at_least_once(self, what, got_keys, expected_keys, optional=frozenset()):
@@ -135,7 +148,7 @@ class Checks:
         if extra:
             detail += f", {len(extra)} unexpected"
         detail += f", {twice} repeated" if twice else ", none repeated"
-        self.judge(f"{what}: {detail}", ok)
+        self.judge(f"{what}: {detail}", ok, "at_least_once")
         return ok
 
 
@@ -208,7 +221,8 @@ def main():
     c.judge(f"zone_pricing table: {len(zp)} zones, each at a window the topic holds with the same values; "
             f"{sum(1 for b in behind.values() if b == 0)} at the latest window, the rest within "
             f"{max(behind.values()) if behind else 0} windows of it",
-            consistent and len(zp) == len(latest) and all(b <= 10 for b in behind.values()))
+            consistent and len(zp) == len(latest) and all(b <= 10 for b in behind.values()),
+            guarantee="upsert")
 
     print("quotes: every order priced under the window it was placed in, exactly once")
     priced = topic("orders.priced")

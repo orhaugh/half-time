@@ -2,6 +2,8 @@
 /state/
 /out/
 /.clink/
+# Release evidence bundles (evidence.sh): kept where they are made, not committed.
+/evidence/
 __pycache__/
 *.pyc
 

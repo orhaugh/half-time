@@ -140,7 +140,7 @@ def main():
     tr = redis_values("order:")
     got_status = {k: v["status"] for k, v in tr.items()}
     c.judge(f"order: keys (Redis): {len(tr)} orders, {sum(1 for k, v in got_status.items() if final.get(k) == v)} "
-            f"at their final state, expected {len(final)}", got_status == final)
+            f"at their final state, expected {len(final)}", got_status == final, guarantee="upsert")
     ro = redis_values("rider-of:")
     got_rider = {k: v["rider_id"] for k, v in ro.items()}
     want_rider = {k: v for k, v in assigned.items() if k not in late_window}
@@ -148,7 +148,7 @@ def main():
         all(assigned.get(k) == v for k, v in got_rider.items())
     c.judge(f"rider-of: keys (Redis): {len(ro)} orders with a rider, "
             f"{sum(1 for k, v in got_rider.items() if assigned.get(k) == v)} as the model says, "
-            f"expected {len(want_rider)} and up to {len(assigned)}", ok)
+            f"expected {len(want_rider)} and up to {len(assigned)}", ok, guarantee="upsert")
     hist = cassandra_rows()
     c.at_least_once("order_history table (Cassandra)", hist, expected_changes)
 

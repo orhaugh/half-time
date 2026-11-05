@@ -78,7 +78,8 @@ def main():
     wrong = [r for r, d in docs.items()
              if r in latest and (d.get("ts"), d.get("battery_pct"), d.get("state"), d.get("cell"))
              != (latest[r]["ts"], latest[r]["battery_pct"], latest[r]["state"], latest[r]["cell"])]
-    c.judge(f"document values: {len(docs) - len(wrong)} of {len(docs)} as the model says", not wrong)
+    c.judge(f"document values: {len(docs) - len(wrong)} of {len(docs)} as the model says", not wrong,
+            guarantee="upsert")
 
     print("the commands: one to charge per low-battery episode, at least once")
     cmds = commands()
