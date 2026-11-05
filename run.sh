@@ -298,15 +298,18 @@ done
 dispatch_join="$(sed -nE 's/^rescalable up to parallelism [0-9]+: //p' "${STATE}/dispatch.submit.err" \
   | tr ',' '\n' | tr -d ' ' | grep '^ijoin_' | head -1 || true)"
 # The parallelism the dispatcher's graph records for an operator.
+# One answer, ? while the Coordinator does not answer. curl's failure is the
+# empty input the parse already answers ? for, so it must not fail the
+# pipeline too (pipefail): a second ? would follow the first, and the wait for
+# the takeover below would take "?\n?" for an answer and stop waiting.
 graph_parallelism() {  # <job id> <operator id>
-  curl -fsS "http://127.0.0.1:$(coord_http)/api/v1/jobs/$1/graph" 2>/dev/null | python3 -c '
+  { curl -fsS "http://127.0.0.1:$(coord_http)/api/v1/jobs/$1/graph" 2>/dev/null || true; } | python3 -c '
 import json, sys
 try:
     nodes = json.load(sys.stdin).get("nodes", [])
 except ValueError:  # no answer, as while a takeover is under way
     nodes = []
-print(next((n.get("parallelism", 1) for n in nodes if n.get("id") == sys.argv[1]), "?"))' "$2" \
-    || echo "?"
+print(next((n.get("parallelism", 1) for n in nodes if n.get("id") == sys.argv[1]), "?"))' "$2"
 }
 # The riders job, the typed C++ one: a module, submitted over the control port.
 # It tells the Workers where the broker and the store are, as the SQL jobs'
