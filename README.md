@@ -384,7 +384,8 @@ start unless the checkout is exactly the candidate with nothing changed and
 `run.sh` with every scene, and writes `evidence/<candidate>-<time>/`:
 
 - `evidence.json`, the summary the release check reads: the candidate, each
-  binary's commit and hash, the half-time commit and any local changes (the
+  binary's commit and hash, the clink install the riders job was built
+  against and the commit it records, the half-time commit and any local changes (the
   diff is kept beside it), the host, the settings the run used and the size
   of the generated night, the run's exit code, each checker's exit code, the
   verdicts counted by guarantee, and what each scene did;

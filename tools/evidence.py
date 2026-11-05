@@ -208,12 +208,23 @@ def collect(args):
         c["held" if v["ok"] else "failed"] += 1
 
     env = {k: os.environ.get(k, d) for k, d in DEFAULTS.items()}
+    # The riders job is the one built here: the clink package it found, and
+    # the commit that package's install records.
+    riders = {"built_against": None, "commit": None}
+    cache = ROOT / ".clink" / "riders" / "CMakeCache.txt"
+    m = re.search(r"^clink_DIR:PATH=(.*)$", cache.read_text(), re.M) if cache.exists() else None
+    if m:
+        riders["built_against"] = m.group(1)
+        header = Path(m.group(1)).parents[2] / "include" / "clink" / "plugin" / "abi_version.hpp"
+        h = re.search(r'kAbiHash = "([0-9a-f]{40})"', header.read_text()) if header.exists() else None
+        riders["commit"] = h.group(1) if h else None
     evidence = {
         "format": FORMAT,
         "created_utc": now(),
         "candidate": provenance["candidate"],
         "clink": provenance["clink"],
         "half_time": provenance["half_time"],
+        "riders": riders,
         "host": provenance["host"],
         "invocation": {"command": "./evidence.sh, which runs ./run.sh", "env": env,
                        "world": json.loads(world.read_text()) if world.exists() else None},

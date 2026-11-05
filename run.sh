@@ -173,7 +173,10 @@ if [ -z "${CLINK_PREFIX:-}" ]; then
   cmake --install "${CLINK_SRC}/build" --prefix "${ROOT}/.clink/prefix" >"${ROOT}/.clink/install.log" 2>&1
   CLINK_PREFIX="${ROOT}/.clink/prefix"
 fi
-cmake -S jobs/riders -B "${ROOT}/.clink/riders" -DCMAKE_PREFIX_PATH="${CLINK_PREFIX}" \
+# --fresh: a clink_DIR cached by an earlier configure would otherwise win over
+# CLINK_PREFIX, and the job would be built against another clink, which the
+# Coordinator refuses at submit (its plugin ABI fingerprint differs).
+cmake --fresh -S jobs/riders -B "${ROOT}/.clink/riders" -DCMAKE_PREFIX_PATH="${CLINK_PREFIX}" \
   -DCMAKE_BUILD_TYPE=Release >"${ROOT}/.clink/riders-configure.log" 2>&1
 cmake --build "${ROOT}/.clink/riders" --parallel 4 >"${ROOT}/.clink/riders-build.log" 2>&1 \
   || { tail -20 "${ROOT}/.clink/riders-build.log" >&2; exit 1; }
